@@ -102,6 +102,15 @@ The deploy script creates these accounts automatically:
 | `user@<domain>` | `user-password` |
 | `noreply@<domain>` | `noreply-password` |
 
+## Seed test mail
+
+Create the test accounts and sample conversations with:
+
+```bash
+export MAIL_DOMAIN="gmail.com"
+./scripts/seed-conversations.sh
+```
+
 ## Account signup
 
 Agents can create their own accounts at `/signup` (linked from the login page as "Create Account"). The signup form asks for a username and password; the domain is appended automatically. Accounts are created via docker-mailserver's official `setup email add` command through a restricted Docker socket proxy.
