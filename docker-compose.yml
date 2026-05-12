@@ -1,0 +1,112 @@
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "50m"
+    max-file: "4"
+
+services:
+  mailserver:
+    image: ghcr.io/docker-mailserver/docker-mailserver:15
+    container_name: mailserver
+    hostname: gmail.com
+    env_file: mailserver.env
+    ports:
+      - "0.0.0.0:25:25"
+      - "127.0.0.1:143:143"
+      - "127.0.0.1:587:587"
+    volumes:
+      - mail-data:/var/mail/
+      - mail-state:/var/mail-state/
+      - mail-logs:/var/log/mail/
+      - ./config/:/tmp/docker-mailserver/
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      - mail-net
+    restart: unless-stopped
+    stop_grace_period: 1m
+    healthcheck:
+      test: "ss --listening --ipv4 --tcp | grep --silent ':smtp' || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging: *default-logging
+
+  roundcube:
+    image: roundcube/roundcubemail:1.6.10-apache
+    container_name: roundcube
+    environment:
+      - ROUNDCUBEMAIL_DEFAULT_HOST=mailserver
+      - ROUNDCUBEMAIL_DEFAULT_PORT=143
+      - ROUNDCUBEMAIL_SMTP_SERVER=mailserver
+      - ROUNDCUBEMAIL_SMTP_PORT=25
+      - ROUNDCUBEMAIL_SKIN=elastic
+      - ROUNDCUBEMAIL_PLUGINS=archive,zipdownload,managesieve,account_signup
+      - ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE=25M
+    volumes:
+      - roundcube-db:/var/roundcube/db
+      - ./roundcube/custom-config.php:/var/roundcube/config/custom-config.php:ro
+      - ./roundcube/plugins/account_signup:/var/www/html/plugins/account_signup:ro
+    ports:
+      - "127.0.0.1:8080:80"
+    networks:
+      - mail-net
+    depends_on:
+      mailserver:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+
+  signup-api:
+    build: ./signup-api
+    container_name: signup-api
+    environment:
+      - MAIL_DOMAIN=${MAIL_DOMAIN:-gmail.com}
+      - MAIL_CONTAINER=mailserver
+      - DOCKER_API=http://docker-proxy:2375
+    ports:
+      - "127.0.0.1:8081:8081"
+    networks:
+      - api-net
+    depends_on:
+      mailserver:
+        condition: service_healthy
+      docker-proxy:
+        condition: service_started
+    restart: unless-stopped
+    logging: *default-logging
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3
+    container_name: docker-proxy
+    environment:
+      POST: 1
+      EXEC: 1
+      CONTAINERS: 0
+      IMAGES: 0
+      VOLUMES: 0
+      NETWORKS: 0
+      NODES: 0
+      SERVICES: 0
+      SWARM: 0
+      TASKS: 0
+      SECRETS: 0
+      CONFIGS: 0
+      BUILD: 0
+      AUTH: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - api-net
+    restart: unless-stopped
+    logging: *default-logging
+
+networks:
+  mail-net:
+  api-net:
+
+volumes:
+  mail-data:
+  mail-state:
+  mail-logs:
+  roundcube-db:
