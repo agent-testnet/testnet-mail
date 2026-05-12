@@ -1,0 +1,241 @@
+{% extends "base.html" %}
+
+{% block title %}Mail Server Dashboard{% endblock %}
+
+{% block content %}
+<div class="container mx-auto px-4 py-8">
+    <!-- Header -->
+    <div class="matrix-header mb-8 p-6 rounded-lg">
+        <h1 class="text-4xl font-bold matrix-glow mb-2">⚡ MAIL SERVER DASHBOARD ⚡</h1>
+        <p class="text-matrix-light-green text-sm">Real-time conversation analysis | System monitoring</p>
+        <div class="mt-4 text-xs text-matrix-dark-green">
+            [SYSTEM ONLINE] | [DATA STREAM ACTIVE] | [CONVERSATIONS MONITORED: {{ stats.total_conversations }}]
+        </div>
+    </div>
+
+    <!-- Statistics Section -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+        <div class="stat-box rounded p-6 matrix-hover">
+            <div class="text-matrix-light-green text-sm font-mono">&gt; TOTAL_USERS</div>
+            <div class="text-3xl font-bold matrix-glow mt-2">{{ stats.total_users }}</div>
+            <div class="text-xs text-matrix-dark-green mt-2">Active Mailboxes</div>
+        </div>
+
+        <div class="stat-box rounded p-6 matrix-hover">
+            <div class="text-matrix-light-green text-sm font-mono">&gt; CONVERSATIONS</div>
+            <div class="text-3xl font-bold matrix-glow mt-2">{{ stats.total_conversations }}</div>
+            <div class="text-xs text-matrix-dark-green mt-2">Total Threads</div>
+        </div>
+
+        <div class="stat-box rounded p-6 matrix-hover">
+            <div class="text-matrix-light-green text-sm font-mono">&gt; MESSAGE_COUNT</div>
+            <div class="text-3xl font-bold matrix-glow mt-2">{{ stats.total_messages }}</div>
+            <div class="text-xs text-matrix-dark-green mt-2">Transmitted Packets</div>
+        </div>
+
+        <div class="stat-box rounded p-6 matrix-hover">
+            <div class="text-matrix-light-green text-sm font-mono">&gt; ACTIVE_TODAY</div>
+            <div class="text-3xl font-bold matrix-glow mt-2">{{ stats.active_today }}</div>
+            <div class="text-xs text-matrix-dark-green mt-2">Online Now</div>
+        </div>
+    </div>
+
+    <!-- Charts Section -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+        <!-- Message Distribution Chart -->
+        <div class="matrix-card rounded-lg p-6">
+            <h2 class="text-xl font-bold matrix-glow mb-4">📊 MESSAGE DISTRIBUTION BY USER</h2>
+            <div class="chart-container">
+                <canvas id="messageChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Conversation Frequency Chart -->
+        <div class="matrix-card rounded-lg p-6">
+            <h2 class="text-xl font-bold matrix-glow mb-4">📈 CONVERSATION FREQUENCY</h2>
+            <div class="chart-container">
+                <canvas id="frequencyChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Conversations Section -->
+    <div class="matrix-card rounded-lg p-6 mb-8">
+        <h2 class="text-2xl font-bold matrix-glow mb-6">💬 ACTIVE CONVERSATIONS</h2>
+
+        <div class="space-y-4">
+            {% for conv in conversations %}
+            <div class="bg-black bg-opacity-50 border border-matrix-dark-green rounded-lg p-4 matrix-hover"
+                style="cursor: pointer; transition: all 0.2s ease;"
+                onclick="window.location.href='/chat?conv={{ conv.id }}'">
+                <div class="flex justify-between items-start mb-3">
+                    <div style="flex: 1;">
+                        <div class="text-sm text-matrix-light-green font-mono">
+                            <span class="text-matrix-green">[{{ conv.sender }}]</span>
+                            <span class="mx-2">➔</span>
+                            <span class="text-matrix-dark-green">[{{ conv.receiver }}]</span>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <span class="text-xs bg-matrix-dark-green text-black px-3 py-1 rounded font-bold">
+                            {{ conv.message_count }} MSGS
+                        </span>
+                        <span class="text-matrix-light-green" style="font-size: 18px; cursor: pointer;"
+                            title="Open in chat">💬</span>
+                    </div>
+                </div>
+
+                <!-- Chat Box -->
+                <div class="bg-black rounded border border-matrix-border p-4 mb-3 max-h-40 overflow-y-auto">
+                    {% for msg in conv.messages %}
+                    <div class="mb-2">
+                        <div class="text-xs text-matrix-light-green font-mono">
+                            {% if msg.sender == conv.sender %}
+                            <span class="text-matrix-green">&gt;</span>
+                            {% else %}
+                            <span class="text-matrix-dark-green">&lt;</span>
+                            {% endif %}
+                            [{{ msg.sender }}] {{ msg.timestamp[:19] | replace('T', ' ') }}
+                        </div>
+                        <div class="text-sm ml-4 text-matrix-text">{{ msg.text }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+
+                <div class="text-xs text-matrix-dark-green">
+                    Status: <span class="text-matrix-light-green">ACTIVE</span> |
+                    Last Update: <span class="text-matrix-light-green">{{ conv.messages[-1].timestamp[:19] |
+                        replace('T', ' ') }}</span>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- System Footer -->
+    <div class="matrix-header p-4 rounded-lg text-center text-xs text-matrix-dark-green">
+        <div>&gt; SYSTEM DIAGNOSTICS: ALL NOMINAL</div>
+        <div>&gt; DATABASE INTEGRITY: VERIFIED</div>
+        <div>&gt; Next Update: <span class="text-matrix-light-green">30s</span></div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Chart.js color scheme
+    const chartColors = {
+        green: '#00ff00',
+        darkGreen: '#00cc00',
+        lightGreen: '#00ff88',
+        bgDark: 'rgba(0, 20, 0, 0.8)',
+        gridColor: 'rgba(0, 255, 0, 0.1)',
+    };
+
+    // Message Distribution Chart
+    const messageCtx = document.getElementById('messageChart').getContext('2d');
+    new Chart(messageCtx, {
+        type: 'bar',
+        data: {
+            labels: [
+                {% for item in stats.message_distribution %}
+                '{{ item.user.split("@")[0] }}'{% if not loop.last %}, {% endif %}
+        {% endfor %}
+            ],
+        datasets: [{
+            label: 'Messages Sent',
+            data: [
+                {% for item in stats.message_distribution %}
+                    {{ item.count }}{% if not loop.last %}, {% endif %}
+    {% endfor %}
+                ],
+    backgroundColor: chartColors.lightGreen,
+        borderColor: chartColors.green,
+            borderWidth: 2,
+                borderRadius: 4,
+            }]
+        },
+    options: {
+        responsive: true,
+            maintainAspectRatio: false,
+                plugins: {
+            legend: {
+                labels: {
+                    color: chartColors.green,
+                        font: { family: "'Courier New', monospace" }
+                }
+            }
+        },
+        scales: {
+            y: {
+                beginAtZero: true,
+                    ticks: { color: chartColors.green },
+                grid: { color: chartColors.gridColor },
+                border: { color: chartColors.green }
+            },
+            x: {
+                ticks: { color: chartColors.green },
+                grid: { color: chartColors.gridColor },
+                border: { color: chartColors.green }
+            }
+        }
+    }
+    });
+
+    // Frequency Chart
+    const frequencyCtx = document.getElementById('frequencyChart').getContext('2d');
+    new Chart(frequencyCtx, {
+        type: 'line',
+        data: {
+            labels: [
+                {% for item in stats.conversation_frequency %}
+                '{{ item.day }}'{% if not loop.last %}, {% endif %}
+        {% endfor %}
+            ],
+        datasets: [{
+            label: 'Conversations/Day',
+            data: [
+                {% for item in stats.conversation_frequency %}
+                    {{ item.count }}{% if not loop.last %}, {% endif %}
+    {% endfor %}
+                ],
+    borderColor: chartColors.green,
+        backgroundColor: 'rgba(0, 255, 0, 0.1)',
+            borderWidth: 3,
+                fill: true,
+                    tension: 0.4,
+                        pointBackgroundColor: chartColors.lightGreen,
+                            pointBorderColor: chartColors.green,
+                                pointRadius: 5,
+                                    pointHoverRadius: 7,
+            }]
+        },
+    options: {
+        responsive: true,
+            maintainAspectRatio: false,
+                plugins: {
+            legend: {
+                labels: {
+                    color: chartColors.green,
+                        font: { family: "'Courier New', monospace" }
+                }
+            }
+        },
+        scales: {
+            y: {
+                beginAtZero: true,
+                    ticks: { color: chartColors.green },
+                grid: { color: chartColors.gridColor },
+                border: { color: chartColors.green }
+            },
+            x: {
+                ticks: { color: chartColors.green },
+                grid: { color: chartColors.gridColor },
+                border: { color: chartColors.green }
+            }
+        }
+    }
+    });
+</script>
+{% endblock %}
