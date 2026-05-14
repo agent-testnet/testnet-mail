@@ -33,12 +33,22 @@
 #                         control plane. Validation is skipped silently if
 #                         unset.
 #   GEMINI_API_KEY        Vertex AI Express Mode API key for the
-#                         mail-classifier service. Leave empty to skip
-#                         classification (the container will crash-loop
-#                         loudly so the misconfig is visible in
-#                         `docker compose logs mail-classifier`).
+#                         mail-classifier service. Mutually exclusive with
+#                         OPENROUTER_API_KEY -- set exactly one of the two
+#                         (or neither, in which case the classifier
+#                         crash-loops while the rest of the stack stays up).
 #   GEMINI_MODEL          Gemini model used by the classifier. Defaults to
 #                         "gemini-2.5-flash-lite".
+#   OPENROUTER_API_KEY    OpenRouter API key (https://openrouter.ai/keys)
+#                         for the mail-classifier service. Mutually
+#                         exclusive with GEMINI_API_KEY. Use this if you
+#                         only have an AI Studio Gemini key (which doesn't
+#                         work with Vertex AI Express Mode) or want a
+#                         different model family.
+#   OPENROUTER_MODEL      OpenRouter model id used by the classifier.
+#                         Defaults to "google/gemini-2.5-flash-lite". Other
+#                         common picks: "openai/gpt-4o-mini",
+#                         "anthropic/claude-3.5-haiku".
 #
 # Prerequisites:
 #   - AWS CLI configured (aws sts get-caller-identity)
@@ -340,6 +350,8 @@ export API_TOKEN='${API_TOKEN:-}'
 export DASHBOARD_PASSWORD='${DASHBOARD_PASSWORD}'
 export GEMINI_API_KEY='${GEMINI_API_KEY:-}'
 export GEMINI_MODEL='${GEMINI_MODEL:-}'
+export OPENROUTER_API_KEY='${OPENROUTER_API_KEY:-}'
+export OPENROUTER_MODEL='${OPENROUTER_MODEL:-}'
 cd /tmp/testnet-mail
 bash scripts/deploy.sh
 rm -rf /tmp/testnet-mail

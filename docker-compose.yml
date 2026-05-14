@@ -114,8 +114,15 @@ services:
       - MAILSERVER_HOST=mailserver
       - MAILSERVER_PORT=143
       - CLASSIFIER_DB_PATH=/var/roundcube/db/sqlite.db
+      # Backend auto-selection: set exactly one of GEMINI_API_KEY (Vertex AI
+      # Express Mode) or OPENROUTER_API_KEY (OpenRouter, OpenAI-compatible).
+      # The classifier picks its backend from whichever key is set; setting
+      # both is rejected at boot. Defaults of "" make compose tolerate the
+      # opposite key being chosen without "var not set" warnings.
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash-lite}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemini-2.5-flash-lite}
     volumes:
       - roundcube-db:/var/roundcube/db
     networks:

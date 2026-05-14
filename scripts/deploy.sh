@@ -113,15 +113,16 @@ DASHBOARD_SECRET_KEY=$(cat "$DASHBOARD_SECRET_KEY_FILE")
 
 # .env feeds docker compose's variable interpolation. TESTNET_MAIL_DOMAINS,
 # TESTNET_MAIL_RELAYS, ROUNDCUBEMAIL_DES_KEY, DASHBOARD_PASSWORD,
-# DASHBOARD_SECRET_KEY, GEMINI_API_KEY, and GEMINI_MODEL are referenced from
-# docker-compose.yml; pass them through as-is (defaults: empty for the
-# testnet vars, generated values for the keys, operator-supplied for
-# DASHBOARD_PASSWORD and GEMINI_API_KEY).
+# DASHBOARD_SECRET_KEY, GEMINI_API_KEY/MODEL, and OPENROUTER_API_KEY/MODEL
+# are referenced from docker-compose.yml; pass them through as-is (defaults:
+# empty for the testnet vars, generated values for the host-side keys,
+# operator-supplied for DASHBOARD_PASSWORD and one of the LLM keys).
 #
-# GEMINI_API_KEY is optional: leave it empty to skip mail-classifier (the
-# container will crash-loop loudly so the misconfigured state is visible in
-# `docker compose logs`, but the rest of the stack stays up). The dashboard
-# falls back to "pending" badges when no classifications exist.
+# Backend selection is automatic: the mail-classifier picks Gemini or
+# OpenRouter from whichever of GEMINI_API_KEY / OPENROUTER_API_KEY is set
+# (and refuses to start if both are set). Leaving both empty makes the
+# classifier container crash-loop loudly while the rest of the stack stays
+# up; the dashboard then falls back to "pending" badges.
 cat > "$INSTALL_DIR/.env" <<EOF
 MAIL_DOMAIN=${MAIL_DOMAIN}
 TESTNET_MAIL_DOMAINS=${TESTNET_MAIL_DOMAINS:-}
@@ -131,11 +132,17 @@ DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
 DASHBOARD_SECRET_KEY=${DASHBOARD_SECRET_KEY}
 GEMINI_API_KEY=${GEMINI_API_KEY:-}
 GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash-lite}
+OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemini-2.5-flash-lite}
 EOF
 chmod 600 "$INSTALL_DIR/.env"
 
-if [ -z "${GEMINI_API_KEY:-}" ]; then
-  echo "    WARNING: GEMINI_API_KEY not set -- mail-classifier will crash-loop until provided" >&2
+if [ -n "${GEMINI_API_KEY:-}" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; then
+  echo "    ERROR: GEMINI_API_KEY and OPENROUTER_API_KEY are both set -- pick one" >&2
+  exit 1
+fi
+if [ -z "${GEMINI_API_KEY:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+  echo "    WARNING: neither GEMINI_API_KEY nor OPENROUTER_API_KEY set -- mail-classifier will crash-loop until one is provided" >&2
 fi
 
 # ── 3a. Render postfix testnet-only outbound policy ─────────────────────────
