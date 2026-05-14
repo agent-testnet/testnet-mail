@@ -136,6 +136,22 @@ services:
     restart: unless-stopped
     logging: *default-logging
 
+  dashboard:
+    build: ./dashboard
+    container_name: dashboard
+    environment:
+      - FLASK_ENV=production
+      - MAIL_SERVER=mailserver
+    ports:
+      - "127.0.0.1:5000:5000"
+    networks:
+      - mail-net
+    depends_on:
+      mailserver:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+
 networks:
   mail-net:
   api-net:
