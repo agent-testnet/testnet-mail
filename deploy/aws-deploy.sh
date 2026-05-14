@@ -13,10 +13,12 @@
 #   bash deploy/aws-deploy.sh logs            # Tail service logs
 #
 # Required env vars (deploy only):
-#   SERVER_URL    Testnet control plane URL
-#   NODE_NAME     Node name in nodes.yaml
-#   NODE_SECRET   Shared secret from nodes.yaml
-#   MAIL_DOMAIN   Primary email domain (e.g. gmail.com)
+#   SERVER_URL          Testnet control plane URL
+#   NODE_NAME           Node name in nodes.yaml
+#   NODE_SECRET         Shared secret from nodes.yaml
+#   MAIL_DOMAIN         Primary email domain (e.g. gmail.com)
+#   DASHBOARD_PASSWORD  Operator password for the /dashboard/ login. The
+#                       dashboard refuses to boot without it (fail-closed).
 #
 # Optional env vars (deploy only):
 #   TESTNET_MAIL_DOMAINS  Additional testnet mail domains beyond MAIL_DOMAIN
@@ -328,6 +330,7 @@ export MAIL_DOMAIN='${MAIL_DOMAIN}'
 export TESTNET_MAIL_DOMAINS='${TESTNET_MAIL_DOMAINS:-}'
 export TESTNET_MAIL_RELAYS='${TESTNET_MAIL_RELAYS:-}'
 export API_TOKEN='${API_TOKEN:-}'
+export DASHBOARD_PASSWORD='${DASHBOARD_PASSWORD}'
 cd /tmp/testnet-mail
 bash scripts/deploy.sh
 rm -rf /tmp/testnet-mail
@@ -341,6 +344,7 @@ do_deploy() {
     : "${NODE_NAME:?NODE_NAME is required}"
     : "${NODE_SECRET:?NODE_SECRET is required}"
     : "${MAIL_DOMAIN:?MAIL_DOMAIN is required}"
+    : "${DASHBOARD_PASSWORD:?DASHBOARD_PASSWORD is required (operator login for /dashboard/)}"
 
     local existing_instance
     existing_instance=$(load_state "instance_${ROLE}")
@@ -632,6 +636,7 @@ do_redeploy() {
     : "${NODE_NAME:?NODE_NAME is required}"
     : "${NODE_SECRET:?NODE_SECRET is required}"
     : "${MAIL_DOMAIN:?MAIL_DOMAIN is required}"
+    : "${DASHBOARD_PASSWORD:?DASHBOARD_PASSWORD is required (operator login for /dashboard/)}"
 
     local ip instance_id
     instance_id=$(load_state "instance_${ROLE}")

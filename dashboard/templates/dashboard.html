@@ -80,7 +80,7 @@
     </div>
 
     <!-- 3D Tracker CTA -->
-    <a href="/visualize" class="block matrix-card rounded-lg p-5 mb-8 matrix-hover"
+    <a href="{{ url_for('visualize') }}" class="block matrix-card rounded-lg p-5 mb-8 matrix-hover"
        style="text-decoration: none; color: inherit;">
         <div class="flex items-center justify-between">
             <div>
@@ -146,7 +146,7 @@
             {% for conv in conversations %}
             <div class="bg-black bg-opacity-50 border border-matrix-dark-green rounded-lg p-4 matrix-hover"
                 style="cursor: pointer; transition: all 0.2s ease;"
-                onclick="window.location.href='/chat?conv={{ conv.id }}'">
+                onclick="window.location.href='{{ url_for('chat') }}?conv={{ conv.id }}'">
                 <div class="flex justify-between items-start mb-3">
                     <div style="flex: 1;">
                         <div class="text-sm text-matrix-light-green font-mono">

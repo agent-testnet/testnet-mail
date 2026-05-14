@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block title %}Login - Mail Dashboard{% endblock %}
+
+{% block extra_css %}
+<style>
+    .login-shell {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: calc(100vh - 60px);
+        padding: 2rem 1rem;
+    }
+    .login-card {
+        width: 100%;
+        max-width: 420px;
+        padding: 2.25rem;
+        border-radius: 4px;
+    }
+    .login-title {
+        font-size: 1.25rem;
+        letter-spacing: 2px;
+        margin-bottom: 1.5rem;
+        text-align: center;
+        text-shadow: 0 0 12px #00ff41;
+    }
+    .login-label {
+        display: block;
+        font-size: 0.8rem;
+        letter-spacing: 1px;
+        margin-bottom: 0.5rem;
+        color: #39ff7a;
+    }
+    .login-input {
+        width: 100%;
+        padding: 0.65rem 0.85rem;
+        font-size: 0.95rem;
+        margin-bottom: 1.25rem;
+        border-radius: 3px;
+    }
+    .login-button {
+        width: 100%;
+        padding: 0.7rem 1rem;
+        background: rgba(0, 255, 65, 0.1);
+        color: #00ff41;
+        border: 1px solid #00ff41;
+        border-radius: 3px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.95rem;
+        letter-spacing: 2px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+    .login-button:hover {
+        background: rgba(0, 255, 65, 0.2);
+        box-shadow: 0 0 18px rgba(0, 255, 65, 0.5);
+    }
+    .login-error {
+        background: rgba(255, 60, 60, 0.12);
+        border: 1px solid #ff4d4d;
+        color: #ff8b8b;
+        padding: 0.6rem 0.75rem;
+        border-radius: 3px;
+        font-size: 0.85rem;
+        margin-bottom: 1rem;
+        text-align: center;
+    }
+    .login-hint {
+        margin-top: 1.25rem;
+        font-size: 0.75rem;
+        color: #39ff7a;
+        opacity: 0.7;
+        text-align: center;
+        letter-spacing: 1px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="login-shell">
+    <form class="login-card matrix-card" method="post" action="{{ url_for('login') }}" autocomplete="off">
+        <div class="login-title">:: AUTHENTICATE ::</div>
+
+        {% if error %}
+        <div class="login-error">{{ error }}</div>
+        {% endif %}
+
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="next"  value="{{ next or '' }}">
+
+        <label class="login-label" for="password">PASSWORD</label>
+        <input class="login-input matrix-input"
+               id="password"
+               name="password"
+               type="password"
+               required
+               autofocus
+               autocomplete="current-password">
+
+        <button class="login-button" type="submit">ENTER</button>
+
+        <div class="login-hint">OPERATOR ACCESS ONLY</div>
+    </form>
+</div>
+{% endblock %}

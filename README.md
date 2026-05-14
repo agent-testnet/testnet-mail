@@ -13,6 +13,7 @@ export SERVER_URL="https://203.0.113.10:8443"
 export NODE_NAME="mail"
 export NODE_SECRET="shared-secret-for-mail"
 export MAIL_DOMAIN="gmail.com"
+export DASHBOARD_PASSWORD="pick-a-strong-operator-password"
 
 bash deploy/aws-deploy.sh deploy
 ```
@@ -41,6 +42,7 @@ export SERVER_URL="https://203.0.113.10:8443"
 export NODE_NAME="mail"
 export NODE_SECRET="shared-secret-for-mail"
 export MAIL_DOMAIN="gmail.com"
+export DASHBOARD_PASSWORD="pick-a-strong-operator-password"
 
 sudo -E ./scripts/deploy.sh
 ```
@@ -75,6 +77,7 @@ Other testnet            │                  ▼                          │
 | roundcube | PHP webmail (elastic skin, branded as "Gmail") | 8080 (local) | mail-net |
 | signup-api | Account registration form + CSRF protection | 8081 (local) | api-net |
 | docker-proxy | Docker socket proxy (exec-only, read-only socket) | 2375 (internal) | api-net |
+| dashboard | Operator-only Flask dashboard (gunicorn), password-protected at `/dashboard/` | 5000 (local) | mail-net |
 
 ### Network isolation
 
@@ -90,6 +93,7 @@ Other testnet            │                  ▼                          │
 | `NODE_NAME` | `mail` | Node name in `nodes.yaml` |
 | `NODE_SECRET` | `shared-secret-for-mail` | Shared secret from `nodes.yaml` |
 | `MAIL_DOMAIN` | `gmail.com` | Primary domain for email addresses |
+| `DASHBOARD_PASSWORD` | `<strong-passphrase>` | Operator password for the `/dashboard/` login. The dashboard refuses to start if this is unset, so a misconfigured deploy can't silently expose mailbox contents. |
 | `TESTNET_MAIL_DOMAINS` *(optional)* | `outlook.com,yahoo.com` | Additional testnet mail domains this server may relay to (comma-separated). Default: empty -- only `MAIL_DOMAIN` is reachable. |
 | `TESTNET_MAIL_RELAYS` *(optional)* | `outlook.com=18.202.0.1:25,yahoo.com=3.4.5.6` | Per-peer SMTP transport routes for the additional testnet mail domains, `domain=ip[:port]` pairs (default port 25). Required for any domain in `TESTNET_MAIL_DOMAINS` you actually want to deliver to. |
 | `API_TOKEN` *(optional)* | `<hex>` | Client API token used to validate `TESTNET_MAIL_DOMAINS` against the live testnet `seed domains` listing at deploy time. Validation is skipped silently if unset. |
@@ -110,6 +114,14 @@ The deploy script creates these accounts automatically:
 Agents can create their own accounts at `/signup` (linked from the login page as "Create Account"). The signup form asks for a username and password; the domain is appended automatically. Accounts are created via docker-mailserver's official `setup email add` command through a restricted Docker socket proxy.
 
 Gmail-style URL `/accounts/signup` is also rewritten to `/signup`.
+
+## Operator dashboard
+
+A small operator dashboard lives at `https://<mail-host>/dashboard/`. It scrapes IMAP for the four seeded test accounts (`alice`, `bob`, `charlie`, `diana`) and renders conversation views, message stats, and a 3D conversation network. Useful for sanity-checking that mail is flowing during testnet runs.
+
+It is **operator-only**, gated by a single shared password (`DASHBOARD_PASSWORD`, see env vars above). Login is a Flask session cookie signed with a persistent key generated and stored on the host at `/etc/testnet/dashboard-secret-key` -- the same persistence pattern as the Roundcube `des_key`, so existing operator sessions survive redeploys. Brute-force attempts hit the `dashboard_login` rate limit at nginx (10 r/min per IP, burst 5).
+
+The dashboard refuses to boot if `DASHBOARD_PASSWORD` is unset; a misconfigured deploy fails the worker loudly rather than silently serving the inboxes of test accounts to the world.
 
 ## Inter-service SMTP
 
@@ -158,8 +170,10 @@ No restart required -- Postfix and Dovecot pick up changes within seconds.
 
 - **No Docker socket exposure**: signup-api talks to a [Docker socket proxy](https://github.com/Tecnativa/docker-socket-proxy) that only allows `exec` operations. The raw socket is never mounted into application containers.
 - **Non-root signup-api**: runs as UID 10001 on Alpine base (no shell-heavy docker:cli image).
-- **CSRF protection**: signup form uses double-submit cookie pattern (SameSite=Strict, HttpOnly, Secure).
-- **Rate limiting**: nginx rate-limits `/signup` (6/min) and webmail (30/min) per IP, with burst allowance.
+- **CSRF protection**: signup form and dashboard login both use the double-submit cookie pattern (SameSite=Strict, HttpOnly, Secure).
+- **Rate limiting**: nginx rate-limits `/signup` (6/min), webmail (30/min), and `/dashboard/` (10/min) per IP, with burst allowance.
+- **Operator dashboard fail-closed**: the dashboard container refuses to start if `DASHBOARD_PASSWORD` is missing, so a misconfigured deploy never silently exposes mailbox content. Sessions signed with a persistent host-side key (`/etc/testnet/dashboard-secret-key`).
+- **Production WSGI**: dashboard runs under gunicorn with `debug` disabled -- no Werkzeug debugger console is reachable from the network.
 - **TLS hardened**: TLS 1.2+ only, modern cipher suite, no session tickets.
 - **Security headers**: X-Frame-Options, X-Content-Type-Options, Referrer-Policy on all responses.
 - **Secrets not in crontab**: certificate renewal credentials stored in `/etc/testnet/mail-creds` (mode 600), sourced by cron at runtime.
@@ -185,6 +199,14 @@ curl -I --cacert /etc/testnet/certs/ca.pem https://gmail.com/mail
 
 # Health check
 curl --cacert /etc/testnet/certs/ca.pem https://gmail.com/health
+
+# Dashboard liveness (unauthenticated)
+curl --cacert /etc/testnet/certs/ca.pem https://gmail.com/dashboard/healthz
+# Expect: ok
+
+# Dashboard login redirect (unauthenticated)
+curl -I --cacert /etc/testnet/certs/ca.pem https://gmail.com/dashboard/
+# Expect: 302 -> /dashboard/login
 
 # SMTP connectivity (from another testnet node)
 echo 'EHLO test' | nc -w 3 <mail-host-ip> 25
@@ -230,6 +252,7 @@ docker compose -f /opt/testnet-mail/docker-compose.yml logs -f             # All
 docker compose -f /opt/testnet-mail/docker-compose.yml logs -f mailserver   # Mail
 docker compose -f /opt/testnet-mail/docker-compose.yml logs -f roundcube    # Webmail
 docker compose -f /opt/testnet-mail/docker-compose.yml logs -f signup-api   # Signup
+docker compose -f /opt/testnet-mail/docker-compose.yml logs -f dashboard    # Operator dashboard (gunicorn)
 docker compose -f /opt/testnet-mail/docker-compose.yml logs -f docker-proxy # Socket proxy
 journalctl -u nginx -f                                                      # nginx
 ```
@@ -255,6 +278,7 @@ postfix/testnet-transport.tmpl              Transport map template (rendered fro
 roundcube/custom-config.php                 Roundcube branding + agent-friendly defaults
 roundcube/plugins/account_signup/           Roundcube plugin: "Create Account" link on login page
 signup-api/                                 Go registration service (Docker API, CSRF, non-root)
+dashboard/                                  Operator-only Flask dashboard (gunicorn, password-protected, /dashboard/)
 nginx/mail.conf                             TLS termination, URL rewrites, rate limiting (server block)
 nginx/rate-limit.conf                       Rate limit zones + server_tokens off (http context)
 scripts/deploy.sh                           Deploy on an existing host (requires root)

@@ -150,9 +150,12 @@
             <span>::</span> TESTNET.MAIL <span class="nav-cursor"></span>
         </div>
         <div class="flex items-center gap-2">
-            <a href="/"          class="{% if active_nav == 'dashboard' %}active{% endif %}">DASHBOARD</a>
-            <a href="/visualize" class="{% if active_nav == 'visualize' %}active{% endif %}">3D&nbsp;NETWORK</a>
-            <a href="/chat"      class="{% if active_nav == 'chat' %}active{% endif %}">CHAT</a>
+            <a href="{{ url_for('index') }}"     class="{% if active_nav == 'dashboard' %}active{% endif %}">DASHBOARD</a>
+            <a href="{{ url_for('visualize') }}" class="{% if active_nav == 'visualize' %}active{% endif %}">3D&nbsp;NETWORK</a>
+            <a href="{{ url_for('chat') }}"      class="{% if active_nav == 'chat' %}active{% endif %}">CHAT</a>
+            {% if session.get('authed') %}
+            <a href="{{ url_for('logout') }}">LOGOUT</a>
+            {% endif %}
         </div>
     </nav>
 

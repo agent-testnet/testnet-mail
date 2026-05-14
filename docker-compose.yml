@@ -141,7 +141,17 @@ services:
     container_name: dashboard
     environment:
       - FLASK_ENV=production
-      - MAIL_SERVER=mailserver
+      - MAIL_DOMAIN=${MAIL_DOMAIN:-gmail.com}
+      - MAILSERVER_HOST=mailserver
+      # DASHBOARD_PASSWORD: shared operator password used by the dashboard's
+      # login form. Required at container start; the app refuses to boot if
+      # empty (so a misconfigured deploy doesn't silently expose data).
+      # DASHBOARD_SECRET_KEY: persistent key for signing the Flask session
+      # cookie. Generated and persisted on the host by scripts/deploy.sh in
+      # the same way ROUNDCUBEMAIL_DES_KEY is, so existing operator sessions
+      # survive redeploys.
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:?DASHBOARD_PASSWORD is required}
+      - DASHBOARD_SECRET_KEY=${DASHBOARD_SECRET_KEY:?DASHBOARD_SECRET_KEY is required}
     ports:
       - "127.0.0.1:5000:5000"
     networks:

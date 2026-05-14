@@ -120,6 +120,12 @@
 <script type="module">
 import { buildNetworkScene } from "{{ url_for('static', filename='js/network-scene.js') }}";
 
+// Public URL for the chat view, computed by Flask so it includes the
+// /dashboard SCRIPT_NAME prefix when the app is mounted under one.
+// Hard-coding "/chat" here would break links once nginx prepends the
+// /dashboard/ prefix, sending the browser to Roundcube instead.
+const CHAT_URL = "{{ url_for('chat') }}";
+
 const data = JSON.parse(document.getElementById('conv-data').textContent);
 const canvas = document.getElementById('viz-canvas');
 const tooltip = document.getElementById('viz-tooltip');
@@ -184,7 +190,7 @@ function renderDetail(email) {
     ];
     convs.forEach(c => {
         const other = c.sender === email ? c.receiver : c.sender;
-        lines.push(`<a class="conv-pill" href="/chat?conv=${c.id}">
+        lines.push(`<a class="conv-pill" href="${CHAT_URL}?conv=${c.id}">
             <div>&rarr; ${escapeHTML(other)}</div>
             <div class="text-xs text-matrix-dark-green">${c.message_count} msg(s) · thread #${c.id}</div>
         </a>`);

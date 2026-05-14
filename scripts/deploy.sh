@@ -14,6 +14,7 @@ NGINX_ENABLED="/etc/nginx/sites-enabled/mail"
 : "${NODE_NAME:?NODE_NAME is required (e.g. mail)}"
 : "${NODE_SECRET:?NODE_SECRET is required}"
 : "${MAIL_DOMAIN:?MAIL_DOMAIN is required (e.g. gmail.com)}"
+: "${DASHBOARD_PASSWORD:?DASHBOARD_PASSWORD is required (operator password for the /dashboard/ login)}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: This script must be run as root" >&2
@@ -57,7 +58,7 @@ echo "    nginx configured and reloaded"
 # ── 3. Install project files ────────────────────────────────────────────────
 
 echo "==> Installing project files to $INSTALL_DIR..."
-mkdir -p "$INSTALL_DIR/roundcube" "$INSTALL_DIR/config" "$INSTALL_DIR/signup-api"
+mkdir -p "$INSTALL_DIR/roundcube" "$INSTALL_DIR/config" "$INSTALL_DIR/signup-api" "$INSTALL_DIR/dashboard"
 
 cp "$REPO_DIR/docker-compose.yml" "$INSTALL_DIR/"
 cp "$REPO_DIR/mailserver.env"     "$INSTALL_DIR/"
@@ -65,6 +66,11 @@ cp "$REPO_DIR/roundcube/custom-config.php" "$INSTALL_DIR/roundcube/"
 cp -r "$REPO_DIR/roundcube/plugins" "$INSTALL_DIR/roundcube/"
 cp "$REPO_DIR/signup-api/main.go"    "$INSTALL_DIR/signup-api/"
 cp "$REPO_DIR/signup-api/Dockerfile" "$INSTALL_DIR/signup-api/"
+cp "$REPO_DIR/dashboard/Dockerfile"       "$INSTALL_DIR/dashboard/"
+cp "$REPO_DIR/dashboard/requirements.txt" "$INSTALL_DIR/dashboard/"
+cp "$REPO_DIR/dashboard/app.py"           "$INSTALL_DIR/dashboard/"
+cp -r "$REPO_DIR/dashboard/templates"     "$INSTALL_DIR/dashboard/"
+cp -r "$REPO_DIR/dashboard/static"        "$INSTALL_DIR/dashboard/"
 
 # Use a sub-domain hostname (mail.<domain>) to keep $myhostname distinct
 # from the virtual mailbox domain. See the comment in mailserver.env.
@@ -87,15 +93,33 @@ if [ ! -s "$ROUNDCUBE_DES_KEY_FILE" ]; then
 fi
 ROUNDCUBEMAIL_DES_KEY=$(cat "$ROUNDCUBE_DES_KEY_FILE")
 
+# Persistent dashboard session-signing key. Same pattern as the Roundcube
+# des_key above: generate once, persist on the host outside any container
+# volume, reuse on every redeploy. This is what keeps operator login
+# sessions valid across container recreates -- without a stable key, every
+# redeploy invalidates the session cookie and forces a re-login.
+DASHBOARD_SECRET_KEY_FILE="/etc/testnet/dashboard-secret-key"
+mkdir -p "$(dirname "$DASHBOARD_SECRET_KEY_FILE")"
+if [ ! -s "$DASHBOARD_SECRET_KEY_FILE" ]; then
+  # 32 random bytes hex-encoded (64 chars) -- plenty of entropy for HMAC signing.
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$DASHBOARD_SECRET_KEY_FILE"
+  chmod 600 "$DASHBOARD_SECRET_KEY_FILE"
+  echo "    Generated new dashboard secret key at $DASHBOARD_SECRET_KEY_FILE"
+fi
+DASHBOARD_SECRET_KEY=$(cat "$DASHBOARD_SECRET_KEY_FILE")
+
 # .env feeds docker compose's variable interpolation. TESTNET_MAIL_DOMAINS,
-# TESTNET_MAIL_RELAYS, and ROUNDCUBEMAIL_DES_KEY are referenced from
-# docker-compose.yml; pass them through as-is (defaults: empty for the
-# testnet vars, generated value for the des_key).
+# TESTNET_MAIL_RELAYS, ROUNDCUBEMAIL_DES_KEY, DASHBOARD_PASSWORD, and
+# DASHBOARD_SECRET_KEY are referenced from docker-compose.yml; pass them
+# through as-is (defaults: empty for the testnet vars, generated values for
+# the keys, operator-supplied for DASHBOARD_PASSWORD).
 cat > "$INSTALL_DIR/.env" <<EOF
 MAIL_DOMAIN=${MAIL_DOMAIN}
 TESTNET_MAIL_DOMAINS=${TESTNET_MAIL_DOMAINS:-}
 TESTNET_MAIL_RELAYS=${TESTNET_MAIL_RELAYS:-}
 ROUNDCUBEMAIL_DES_KEY=${ROUNDCUBEMAIL_DES_KEY}
+DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
+DASHBOARD_SECRET_KEY=${DASHBOARD_SECRET_KEY}
 EOF
 chmod 600 "$INSTALL_DIR/.env"
 
@@ -240,7 +264,22 @@ if [ "$status" != "healthy" ]; then
   exit 1
 fi
 
-echo "==> Starting Roundcube, signup-api, and docker-proxy..."
+# Seed the four dashboard test accounts (alice/bob/charlie/diana) plus a
+# handful of sample conversations between them, but only on first deploy.
+# The dashboard's IMAP scrape (dashboard/app.py:TEST_ACCOUNTS) hardcodes
+# these accounts; without them the dashboard renders an empty page after
+# login and operators conclude "nothing happened". We gate on alice's
+# existence so redeploys don't keep re-sending the same canned messages
+# and bloating the inboxes. To re-seed manually, delete the accounts and
+# rerun this script, or call scripts/seed-conversations.sh directly.
+if ! docker exec mailserver setup email list 2>/dev/null | grep -q "alice@${MAIL_DOMAIN}"; then
+  echo "==> Seeding dashboard test accounts and conversations..."
+  MAIL_DOMAIN="$MAIL_DOMAIN" bash "$REPO_DIR/scripts/seed-conversations.sh"
+else
+  echo "==> Dashboard test accounts already present, skipping conversation seed."
+fi
+
+echo "==> Starting Roundcube, signup-api, dashboard, and docker-proxy..."
 docker compose up -d
 
 # ── 7. Certificate renewal cron ─────────────────────────────────────────────
