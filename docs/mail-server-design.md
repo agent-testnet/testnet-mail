@@ -295,11 +295,24 @@ services:
     environment:
       - ROUNDCUBEMAIL_DEFAULT_HOST=mailserver
       - ROUNDCUBEMAIL_DEFAULT_PORT=143
+      # Use the submission service (587) for SMTP. docker-mailserver only
+      # advertises SASL AUTH on submission/submissions; port 25 is the
+      # inter-MTA path and will refuse Roundcube's AUTH attempt.
       - ROUNDCUBEMAIL_SMTP_SERVER=mailserver
-      - ROUNDCUBEMAIL_SMTP_PORT=25
+      - ROUNDCUBEMAIL_SMTP_PORT=587
       - ROUNDCUBEMAIL_SKIN=elastic
       - ROUNDCUBEMAIL_PLUGINS=archive,zipdownload,managesieve
       - ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE=25M
+      # Pin the session-encryption key. The roundcube image regenerates a
+      # random des_key on every fresh container start when none is provided
+      # (the config dir is not on a volume), which silently invalidates all
+      # logged-in webmail sessions: rcube_smtp.php substitutes %p with the
+      # decrypted IMAP password from $_SESSION, gets an empty string when
+      # decryption fails, skips SMTP AUTH, and the submission service
+      # rejects the unauthenticated client. scripts/deploy.sh generates
+      # this value once into /etc/testnet/roundcube-des-key (mode 600) and
+      # exposes it through .env.
+      - ROUNDCUBEMAIL_DES_KEY=${ROUNDCUBEMAIL_DES_KEY:-}
     volumes:
       - roundcube-db:/var/roundcube/db
       - ./roundcube/custom-config.php:/var/roundcube/config/custom-config.php:ro
@@ -321,8 +334,13 @@ volumes:
 Create `/opt/testnet-mail/mailserver.env`:
 
 ```bash
-# Hostname and domain
-OVERRIDE_HOSTNAME=gmail.com
+# Hostname and domain. Use a sub-domain (e.g. mail.gmail.com) -- NOT the
+# bare mail domain. docker-mailserver puts this into Postfix's $myhostname,
+# and $myhostname is referenced by mydestination. If $myhostname equals
+# the virtual mailbox domain, Postfix routes inbound mail through the
+# `local` transport (Unix users only) instead of `virtual` -> Dovecot LMTP,
+# and every delivery bounces with "unknown user".
+OVERRIDE_HOSTNAME=mail.gmail.com
 
 # Disable features unnecessary for a closed testnet
 ENABLE_CLAMAV=0
@@ -576,6 +594,41 @@ This keeps the DNAT system unchanged and avoids the need for multi-port VIP rout
 ### Alternative: SMTP over the VIP network (future)
 
 If multi-port DNAT is added to the testnet router, nodes could address the mail server as `gmail.com:25` through the VIP. This would require changes to `server/router/router.go` to support per-port DNAT rules (currently all traffic to a VIP maps to a single address). This is out of scope for the initial deployment.
+
+### Outbound containment: testnet-only recipient policy
+
+By default, Postfix's `smtpd_relay_restrictions` lets any authenticated SASL user (Roundcube webmail user) and any sender on the internal docker network relay to **any** recipient domain. On a passive testnet mail node this is wrong: outbound mail must never escape to the real internet (and on EC2 it would silently fail anyway because port 25 egress is blocked).
+
+The fix is a single Postfix recipient access map evaluated **before** the `permit_*` clauses, so it applies to authenticated users, mynetworks senders, and external SMTP sources alike. The policy lives in [`postfix/postfix-main.cf`](../postfix/postfix-main.cf) (auto-loaded by docker-mailserver and appended to `/etc/postfix/main.cf`):
+
+```
+smtpd_recipient_restrictions =
+    check_recipient_access pcre:/tmp/docker-mailserver/testnet-recipients.pcre,
+    permit_sasl_authenticated,
+    permit_mynetworks,
+    reject_unauth_destination,
+    ...
+```
+
+The PCRE map and a companion `transport_maps` are rendered from templates at deploy time:
+
+| Env var | Effect |
+|---|---|
+| `MAIL_DOMAIN` (required) | Always allowed; delivered locally via `virtual_mailbox_domains` -> Dovecot LMTP. |
+| `TESTNET_MAIL_DOMAINS` (optional, comma-separated) | Additional testnet mail domains that pass the recipient check. |
+| `TESTNET_MAIL_RELAYS` (optional, `domain=ip[:port]` pairs) | Postfix `transport_maps` entries that route each peer testnet mail domain straight to its real public IP, bypassing MX/A lookup. Default port: 25. |
+
+Three delivery paths, none of which need DNS:
+
+| Recipient | How resolved |
+|---|---|
+| `*@MAIL_DOMAIN` | Local virtual delivery; no DNS lookup. |
+| `*@<peer testnet mail domain>` | Postfix `transport_maps` -> direct port-25 SMTP to the peer's real public IP. |
+| Anything else | Rejected at SMTP recipient time with `554 5.7.1 Recipient outside the testnet is not reachable from this server`. |
+
+This intentionally keeps the mail node **passive**. Joining the WireGuard tunnel and resolving testnet DNS would not help SMTP routing today: testnet DNS only serves A records mapping a domain to a single VIP, and the VIP DNAT rewrites all traffic to a node's `host:port` declaration (set to `:443` for the mail node) -- so a packet to `gmail.com:25` over the VIP would land on `MAIL_HOST_IP:443`, not SMTP.
+
+Validation: the deploy script optionally calls `testnet-toolkit seed domains` and warns (does not fail) if any configured testnet mail domain is not actually registered in `nodes.yaml`. Skipped silently when no API token is available or the control plane is briefly unreachable.
 
 ### Network requirements
 

@@ -18,6 +18,19 @@
 #   NODE_SECRET   Shared secret from nodes.yaml
 #   MAIL_DOMAIN   Primary email domain (e.g. gmail.com)
 #
+# Optional env vars (deploy only):
+#   TESTNET_MAIL_DOMAINS  Additional testnet mail domains beyond MAIL_DOMAIN
+#                         that this server may relay to, comma-separated
+#                         (e.g. "outlook.com,yahoo.com").
+#   TESTNET_MAIL_RELAYS   Per-peer SMTP transport routes for the additional
+#                         testnet mail domains, "domain=ip[:port]" pairs
+#                         comma-separated (e.g. "outlook.com=1.2.3.4:25").
+#                         Defaults to port 25 when port is omitted.
+#   API_TOKEN             Client API token used to validate
+#                         TESTNET_MAIL_DOMAINS against the live testnet
+#                         control plane. Validation is skipped silently if
+#                         unset.
+#
 # Prerequisites:
 #   - AWS CLI configured (aws sts get-caller-identity)
 #   - python3, rsync
@@ -302,12 +315,19 @@ rsync_and_deploy() {
         "$PROJECT_DIR/" "ubuntu@${ip}:/tmp/testnet-mail/"
 
     info "Running deploy.sh on instance..."
+    # TESTNET_MAIL_DOMAINS and TESTNET_MAIL_RELAYS are optional. They control
+    # the testnet-only outbound mail policy (additional allowed peer mail
+    # domains, and transport routes to those peers' real public IPs). Default
+    # to empty -> mail is restricted to MAIL_DOMAIN only.
     remote_exec "$ip" "$key" "sudo bash -s" << DEPLOY
 set -euo pipefail
 export SERVER_URL='${SERVER_URL}'
 export NODE_NAME='${NODE_NAME}'
 export NODE_SECRET='${NODE_SECRET}'
 export MAIL_DOMAIN='${MAIL_DOMAIN}'
+export TESTNET_MAIL_DOMAINS='${TESTNET_MAIL_DOMAINS:-}'
+export TESTNET_MAIL_RELAYS='${TESTNET_MAIL_RELAYS:-}'
+export API_TOKEN='${API_TOKEN:-}'
 cd /tmp/testnet-mail
 bash scripts/deploy.sh
 rm -rf /tmp/testnet-mail

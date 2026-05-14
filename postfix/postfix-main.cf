@@ -1,0 +1,35 @@
+# Postfix overrides appended to /etc/postfix/main.cf by docker-mailserver
+# at container start (file mounted at /tmp/docker-mailserver/postfix-main.cf).
+#
+# Restrict outbound mail to testnet mail domains only.
+#
+# The check_recipient_access entry runs BEFORE permit_sasl_authenticated and
+# permit_mynetworks, so the policy applies to every sender path:
+#
+#   * Roundcube webmail users (authenticated via SASL on submission/587)
+#   * The internal docker mail-net (covered by permit_mynetworks today)
+#   * External SMTP sources delivering inbound mail to local recipients
+#
+# Recipients matching a configured testnet mail domain are accepted with OK
+# and proceed to delivery (local virtual delivery for MAIL_DOMAIN, or
+# transport_maps for peer testnet mail nodes). Anything else is rejected
+# with a clear 5.7.1 bounce.
+smtpd_recipient_restrictions =
+    check_recipient_access pcre:/tmp/docker-mailserver/testnet-recipients.pcre,
+    permit_sasl_authenticated,
+    permit_mynetworks,
+    reject_unauth_destination,
+    reject_invalid_helo_hostname,
+    reject_non_fqdn_helo_hostname,
+    reject_unknown_recipient_domain
+
+# Route peer testnet mail domains to their real public IPs over direct
+# port-25 SMTP, bypassing MX/A lookup. The testnet's VIP/DNAT system maps
+# every VIP to a single host:port (the mail node is registered as :443),
+# so SMTP cannot use VIPs -- node-to-node mail goes via real public IPs
+# as documented in docs/mail-server-design.md.
+#
+# The map is empty by default and populated from TESTNET_MAIL_RELAYS by
+# scripts/deploy.sh. Local MAIL_DOMAIN delivery does not need an entry
+# here; it is handled by virtual_mailbox_domains -> Dovecot LMTP.
+transport_maps = hash:/tmp/docker-mailserver/testnet-transport

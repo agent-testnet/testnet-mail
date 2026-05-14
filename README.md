@@ -90,6 +90,9 @@ Other testnet            │                  ▼                          │
 | `NODE_NAME` | `mail` | Node name in `nodes.yaml` |
 | `NODE_SECRET` | `shared-secret-for-mail` | Shared secret from `nodes.yaml` |
 | `MAIL_DOMAIN` | `gmail.com` | Primary domain for email addresses |
+| `TESTNET_MAIL_DOMAINS` *(optional)* | `outlook.com,yahoo.com` | Additional testnet mail domains this server may relay to (comma-separated). Default: empty -- only `MAIL_DOMAIN` is reachable. |
+| `TESTNET_MAIL_RELAYS` *(optional)* | `outlook.com=18.202.0.1:25,yahoo.com=3.4.5.6` | Per-peer SMTP transport routes for the additional testnet mail domains, `domain=ip[:port]` pairs (default port 25). Required for any domain in `TESTNET_MAIL_DOMAINS` you actually want to deliver to. |
+| `API_TOKEN` *(optional)* | `<hex>` | Client API token used to validate `TESTNET_MAIL_DOMAINS` against the live testnet `seed domains` listing at deploy time. Validation is skipped silently if unset. |
 
 ## Seeded accounts
 
@@ -111,6 +114,25 @@ Gmail-style URL `/accounts/signup` is also rewritten to `/signup`.
 ## Inter-service SMTP
 
 Port 25 is open to the network so other testnet nodes (e.g. a Reddit/Lemmy clone) can deliver email to mailserver accounts. Configure the sending service with the mail host's **public IP** on port 25. Postfix accepts mail for its own domain from any source but does not relay to external domains. See [the design doc](docs/mail-server-design.md#smtp-routing-for-inter-service-email) for details.
+
+## Testnet-only outbound mail
+
+Outbound mail is locked to testnet mail domains by a Postfix recipient policy ([`postfix/postfix-main.cf`](postfix/postfix-main.cf)). The policy is evaluated **before** `permit_sasl_authenticated` and `permit_mynetworks`, so it applies to webmail users, the internal docker network, and external SMTP sources alike:
+
+- Recipients on `MAIL_DOMAIN` (or anything listed in `TESTNET_MAIL_DOMAINS`) are accepted.
+- Everything else is rejected at SMTP recipient time with `554 5.7.1 Recipient outside the testnet is not reachable from this server` -- no real-internet delivery is ever attempted.
+
+For peer testnet mail nodes (other mail servers running on the same testnet under different domains), set both `TESTNET_MAIL_DOMAINS` and `TESTNET_MAIL_RELAYS`. The relays populate a Postfix `transport_maps` that routes each peer domain straight to the other node's real public IP on port 25 -- bypassing MX/A lookup, matching the [direct-IP SMTP pattern](docs/mail-server-design.md#smtp-routing-for-inter-service-email) the testnet uses (the testnet's VIP/DNAT system maps every VIP to a single host:port set to `:443`, so SMTP cannot use VIPs).
+
+Example -- this node serves `gmail.com`, with `outlook.com` running on a different mail node at `18.202.0.1`:
+
+```bash
+export MAIL_DOMAIN="gmail.com"
+export TESTNET_MAIL_DOMAINS="outlook.com"
+export TESTNET_MAIL_RELAYS="outlook.com=18.202.0.1:25"
+```
+
+Local delivery for `*@gmail.com` continues via Dovecot LMTP (no DNS lookup). Mail to `*@outlook.com` is handed to the transport map and delivered straight to `18.202.0.1:25`. Mail to anything else is rejected with the bounce above.
 
 ## Account management
 
@@ -197,6 +219,10 @@ docker exec mailserver doveadm auth test user@gmail.com password
 
 **Rate limited (429)**: Wait a minute and retry, or adjust limits in `nginx/rate-limit.conf`.
 
+**Webmail "SMTP Error (554) ... Client host rejected: Access denied"**: The submission service (port 587) requires SASL auth, and Roundcube only authenticates if it can decrypt the IMAP password from the user's session. If the session was created before a `roundcube` container recreate that regenerated `des_key`, decryption silently returns empty and SMTP AUTH is skipped. The deploy script pins `des_key` to `/etc/testnet/roundcube-des-key` and passes it to the container via `ROUNDCUBEMAIL_DES_KEY`, so sessions survive normal recreates. If a user still sees this error (e.g. immediately after the very first deploy that introduced the pin, or after the file was deleted), have them log out and log back in.
+
+**Sent mail shows up in Sent folder but never arrives in any local Inbox** (with `mail.log` warning `do not list domain <X> in BOTH mydestination and virtual_mailbox_domains` and `status=bounced (unknown user: ...)`): `OVERRIDE_HOSTNAME` is set to the bare mail domain instead of a sub-domain. Postfix copies `$myhostname` into `mydestination`, which then collides with `virtual_mailbox_domains` and steals delivery away from Dovecot LMTP into the `local` transport (which only knows Unix users). Fix: set `OVERRIDE_HOSTNAME=mail.<domain>` in `mailserver.env` and recreate the `mailserver` container. `scripts/deploy.sh` does this automatically; if you edit by hand, keep the `mail.` prefix.
+
 ## Logs
 
 ```bash
@@ -223,6 +249,9 @@ docker run --rm \
 deploy/aws-deploy.sh                        Full AWS lifecycle: deploy, teardown, status, ssh, redeploy, restart, logs
 docker-compose.yml                          4 services + 2 isolated networks
 mailserver.env                              docker-mailserver config (security features disabled for testnet)
+postfix/postfix-main.cf                     Postfix overrides: testnet-only recipient policy + transport_maps
+postfix/testnet-recipients.pcre.tmpl        Recipient access map template (rendered from MAIL_DOMAIN + TESTNET_MAIL_DOMAINS)
+postfix/testnet-transport.tmpl              Transport map template (rendered from TESTNET_MAIL_RELAYS)
 roundcube/custom-config.php                 Roundcube branding + agent-friendly defaults
 roundcube/plugins/account_signup/           Roundcube plugin: "Create Account" link on login page
 signup-api/                                 Go registration service (Docker API, CSRF, non-root)

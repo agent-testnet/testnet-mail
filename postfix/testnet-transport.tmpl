@@ -1,0 +1,17 @@
+# Postfix transport map for the testnet-only outbound policy.
+#
+# Rendered from this template by scripts/deploy.sh. The TESTNET_TRANSPORT_LINES
+# placeholder below is replaced with one Postfix transport_maps line per peer
+# testnet mail node, in the form:
+#
+#     outlook.com    smtp:[1.2.3.4]:25
+#
+# (Empty when TESTNET_MAIL_RELAYS is unset.)
+#
+# Referenced by postfix-main.cf via:
+#   transport_maps = hash:/tmp/docker-mailserver/testnet-transport
+#
+# After rendering, scripts/deploy.sh runs `postmap` to compile this into the
+# .db file Postfix actually reads at runtime.
+
+${TESTNET_TRANSPORT_LINES}

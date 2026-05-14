@@ -1,0 +1,14 @@
+# Postfix PCRE access map for the testnet-only outbound policy.
+#
+# Rendered from this template by scripts/deploy.sh. The TESTNET_DOMAINS_REGEX
+# placeholder below is replaced with an escaped regex alternation built from
+# MAIL_DOMAIN and TESTNET_MAIL_DOMAINS (e.g. "google\.com|outlook\.com").
+#
+# Referenced by postfix-main.cf via:
+#   check_recipient_access pcre:/tmp/docker-mailserver/testnet-recipients.pcre
+
+# Accept recipients on any configured testnet mail domain.
+/@(?:${TESTNET_DOMAINS_REGEX})$/i  OK
+
+# Reject everything else (no real-internet delivery on this testnet node).
+/@.+/                              REJECT 5.7.1 Recipient outside the testnet is not reachable from this server

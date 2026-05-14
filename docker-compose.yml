@@ -10,6 +10,21 @@ services:
     container_name: mailserver
     hostname: gmail.com
     env_file: mailserver.env
+    environment:
+      # Documented contract for the testnet-only outbound policy. These vars
+      # are consumed by scripts/deploy.sh to render config/testnet-recipients.pcre
+      # and config/testnet-transport (mounted into the container at
+      # /tmp/docker-mailserver/). They are passed through here so the values
+      # are visible in `docker inspect mailserver` for operators.
+      #
+      # TESTNET_MAIL_DOMAINS: comma-separated list of additional testnet mail
+      #   domains beyond MAIL_DOMAIN, whose recipients are accepted by the
+      #   outbound policy (e.g. "outlook.com,yahoo.com").
+      # TESTNET_MAIL_RELAYS:  comma-separated list of "domain=ip:port" pairs
+      #   that route those peer testnet mail domains to their real public IPs
+      #   over direct port-25 SMTP (e.g. "outlook.com=1.2.3.4:25").
+      - TESTNET_MAIL_DOMAINS=${TESTNET_MAIL_DOMAINS:-}
+      - TESTNET_MAIL_RELAYS=${TESTNET_MAIL_RELAYS:-}
     ports:
       - "0.0.0.0:25:25"
       - "127.0.0.1:143:143"
@@ -38,11 +53,26 @@ services:
     environment:
       - ROUNDCUBEMAIL_DEFAULT_HOST=mailserver
       - ROUNDCUBEMAIL_DEFAULT_PORT=143
+      # Use the submission service (port 587) instead of port 25. docker-mailserver
+      # only enables SASL on submission/submissions; port 25 is the inter-MTA port
+      # and intentionally does not advertise AUTH. Plain SASL is fine here because
+      # the connection stays inside the internal mail-net docker network (same
+      # trust model as the IMAP/143 wiring above).
       - ROUNDCUBEMAIL_SMTP_SERVER=mailserver
-      - ROUNDCUBEMAIL_SMTP_PORT=25
+      - ROUNDCUBEMAIL_SMTP_PORT=587
       - ROUNDCUBEMAIL_SKIN=elastic
       - ROUNDCUBEMAIL_PLUGINS=archive,zipdownload,managesieve,account_signup
       - ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE=25M
+      # Pin des_key to a stable value generated and persisted by
+      # scripts/deploy.sh. Without this, the entrypoint regenerates a random
+      # des_key on every container recreate -- which silently invalidates all
+      # logged-in sessions because Roundcube can no longer decrypt the stored
+      # IMAP password from $_SESSION. The decrypted-to-empty password then
+      # makes rcube_smtp.php skip SMTP AUTH entirely, and the submission
+      # service rejects the unauthenticated client with "5.7.1 Client host
+      # rejected: Access denied". Pinning the key keeps existing webmail
+      # sessions working across deploys.
+      - ROUNDCUBEMAIL_DES_KEY=${ROUNDCUBEMAIL_DES_KEY:-}
     volumes:
       - roundcube-db:/var/roundcube/db
       - ./roundcube/custom-config.php:/var/roundcube/config/custom-config.php:ro
@@ -80,9 +110,14 @@ services:
     image: tecnativa/docker-socket-proxy:0.3
     container_name: docker-proxy
     environment:
+      # /containers/{id}/exec is part of the CONTAINERS namespace in
+      # docker-socket-proxy, so CONTAINERS must be enabled in addition to EXEC
+      # for `signup-api` to create exec instances inside the mailserver. The
+      # proxy is bound to the internal api-net only and POST is restricted to
+      # exec creation paths via the namespace toggles below.
       POST: 1
       EXEC: 1
-      CONTAINERS: 0
+      CONTAINERS: 1
       IMAGES: 0
       VOLUMES: 0
       NETWORKS: 0
