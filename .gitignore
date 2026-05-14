@@ -1,5 +1,6 @@
 .DS_Store
-config/
+config/*
+!config/postfix-main.cf
 backups/
 *.log
 deploy/.aws-state.json
