@@ -58,7 +58,7 @@ echo "    nginx configured and reloaded"
 # ── 3. Install project files ────────────────────────────────────────────────
 
 echo "==> Installing project files to $INSTALL_DIR..."
-mkdir -p "$INSTALL_DIR/roundcube" "$INSTALL_DIR/config" "$INSTALL_DIR/signup-api" "$INSTALL_DIR/dashboard"
+mkdir -p "$INSTALL_DIR/roundcube" "$INSTALL_DIR/config" "$INSTALL_DIR/signup-api" "$INSTALL_DIR/dashboard" "$INSTALL_DIR/mail-classifier"
 
 cp "$REPO_DIR/docker-compose.yml" "$INSTALL_DIR/"
 cp "$REPO_DIR/mailserver.env"     "$INSTALL_DIR/"
@@ -71,6 +71,9 @@ cp "$REPO_DIR/dashboard/requirements.txt" "$INSTALL_DIR/dashboard/"
 cp "$REPO_DIR/dashboard/app.py"           "$INSTALL_DIR/dashboard/"
 cp -r "$REPO_DIR/dashboard/templates"     "$INSTALL_DIR/dashboard/"
 cp -r "$REPO_DIR/dashboard/static"        "$INSTALL_DIR/dashboard/"
+cp "$REPO_DIR/mail-classifier/Dockerfile" "$INSTALL_DIR/mail-classifier/"
+cp "$REPO_DIR/mail-classifier/requirements.txt" "$INSTALL_DIR/mail-classifier/"
+cp -r "$REPO_DIR/mail-classifier/src" "$INSTALL_DIR/mail-classifier/"
 
 # Use a sub-domain hostname (mail.<domain>) to keep $myhostname distinct
 # from the virtual mailbox domain. See the comment in mailserver.env.
@@ -109,10 +112,16 @@ fi
 DASHBOARD_SECRET_KEY=$(cat "$DASHBOARD_SECRET_KEY_FILE")
 
 # .env feeds docker compose's variable interpolation. TESTNET_MAIL_DOMAINS,
-# TESTNET_MAIL_RELAYS, ROUNDCUBEMAIL_DES_KEY, DASHBOARD_PASSWORD, and
-# DASHBOARD_SECRET_KEY are referenced from docker-compose.yml; pass them
-# through as-is (defaults: empty for the testnet vars, generated values for
-# the keys, operator-supplied for DASHBOARD_PASSWORD).
+# TESTNET_MAIL_RELAYS, ROUNDCUBEMAIL_DES_KEY, DASHBOARD_PASSWORD,
+# DASHBOARD_SECRET_KEY, GEMINI_API_KEY, and GEMINI_MODEL are referenced from
+# docker-compose.yml; pass them through as-is (defaults: empty for the
+# testnet vars, generated values for the keys, operator-supplied for
+# DASHBOARD_PASSWORD and GEMINI_API_KEY).
+#
+# GEMINI_API_KEY is optional: leave it empty to skip mail-classifier (the
+# container will crash-loop loudly so the misconfigured state is visible in
+# `docker compose logs`, but the rest of the stack stays up). The dashboard
+# falls back to "pending" badges when no classifications exist.
 cat > "$INSTALL_DIR/.env" <<EOF
 MAIL_DOMAIN=${MAIL_DOMAIN}
 TESTNET_MAIL_DOMAINS=${TESTNET_MAIL_DOMAINS:-}
@@ -120,8 +129,14 @@ TESTNET_MAIL_RELAYS=${TESTNET_MAIL_RELAYS:-}
 ROUNDCUBEMAIL_DES_KEY=${ROUNDCUBEMAIL_DES_KEY}
 DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
 DASHBOARD_SECRET_KEY=${DASHBOARD_SECRET_KEY}
+GEMINI_API_KEY=${GEMINI_API_KEY:-}
+GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash-lite}
 EOF
 chmod 600 "$INSTALL_DIR/.env"
+
+if [ -z "${GEMINI_API_KEY:-}" ]; then
+  echo "    WARNING: GEMINI_API_KEY not set -- mail-classifier will crash-loop until provided" >&2
+fi
 
 # ── 3a. Render postfix testnet-only outbound policy ─────────────────────────
 #
@@ -308,6 +323,7 @@ echo "  Signup:     https://$MAIL_DOMAIN/signup"
 echo "  SMTP:       $PUBLIC_IP:25 (open for testnet nodes)"
 echo ""
 echo "  Seeded accounts: admin, agent, user, noreply @${MAIL_DOMAIN}"
+echo "  Classifier: mail-classifier (uses Roundcube SQLite + Gemini API key)"
 echo ""
 echo "  Add accounts (CLI):"
 echo "    docker exec mailserver setup email add newuser@${MAIL_DOMAIN} password"

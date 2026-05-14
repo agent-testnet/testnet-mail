@@ -32,6 +32,13 @@
 #                         TESTNET_MAIL_DOMAINS against the live testnet
 #                         control plane. Validation is skipped silently if
 #                         unset.
+#   GEMINI_API_KEY        Vertex AI Express Mode API key for the
+#                         mail-classifier service. Leave empty to skip
+#                         classification (the container will crash-loop
+#                         loudly so the misconfig is visible in
+#                         `docker compose logs mail-classifier`).
+#   GEMINI_MODEL          Gemini model used by the classifier. Defaults to
+#                         "gemini-2.5-flash-lite".
 #
 # Prerequisites:
 #   - AWS CLI configured (aws sts get-caller-identity)
@@ -331,6 +338,8 @@ export TESTNET_MAIL_DOMAINS='${TESTNET_MAIL_DOMAINS:-}'
 export TESTNET_MAIL_RELAYS='${TESTNET_MAIL_RELAYS:-}'
 export API_TOKEN='${API_TOKEN:-}'
 export DASHBOARD_PASSWORD='${DASHBOARD_PASSWORD}'
+export GEMINI_API_KEY='${GEMINI_API_KEY:-}'
+export GEMINI_MODEL='${GEMINI_MODEL:-}'
 cd /tmp/testnet-mail
 bash scripts/deploy.sh
 rm -rf /tmp/testnet-mail

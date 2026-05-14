@@ -233,6 +233,37 @@
         font-family: 'Courier New', monospace;
     }
 
+    .classification-badge {
+        display: inline-flex;
+        align-items: center;
+        margin-left: 8px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: bold;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        border: 1px solid #00cc00;
+    }
+
+    .classification-badge.benign {
+        background: rgba(0, 120, 0, 0.25);
+        color: #6dff8d;
+        border-color: #39ff7a;
+    }
+
+    .classification-badge.malicious {
+        background: rgba(255, 40, 40, 0.14);
+        color: #ff6b6b;
+        border-color: #ff4d4d;
+    }
+
+    .classification-badge.pending {
+        background: rgba(90, 110, 90, 0.18);
+        color: #9bd39b;
+        border-color: #4b7a4b;
+    }
+
     /* Empty state */
     .empty-state {
         flex: 1;
@@ -372,6 +403,11 @@
         }
     }
 
+    function renderClassificationBadge(msg) {
+        const label = msg.classification_label || 'pending';
+        return `<span class="classification-badge ${escapeHtml(label)}">${escapeHtml(label)}</span>`;
+    }
+
     function renderChat(conv) {
         const chatContent = document.getElementById('chatContent');
 
@@ -397,7 +433,7 @@
                     <div class="message-group ${className}">
                         <div class="message-wrapper">
                             <div style="font-size: 11px; color: #00cc00; margin-bottom: 4px; font-family: 'Courier New', monospace;">
-                                [${escapeHtml(msg.sender)}]
+                                [${escapeHtml(msg.sender)}] ${renderClassificationBadge(msg)}
                             </div>
                             <div class="message ${className}">
                                 <span style="color: #00cc00;">[${icon}]</span> ${escapeHtml(msg.text)}

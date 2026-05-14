@@ -75,6 +75,7 @@ Other testnet            │                  ▼                          │
 | nginx (host) | TLS termination, Gmail URL rewrites, reverse proxy, rate limiting | 443 | host |
 | mailserver | Postfix (SMTP) + Dovecot (IMAP), mailbox storage | 25 (public), 143, 587 (local) | mail-net |
 | roundcube | PHP webmail (elastic skin, branded as "Gmail") | 8080 (local) | mail-net |
+| mail-classifier | Python worker that syncs IMAP mail, classifies new messages with Gemini, and stores results in Roundcube's SQLite DB | - | mail-net |
 | signup-api | Account registration form + CSRF protection | 8081 (local) | api-net |
 | docker-proxy | Docker socket proxy (exec-only, read-only socket) | 2375 (internal) | api-net |
 | dashboard | Operator-only Flask dashboard (gunicorn), password-protected at `/dashboard/` | 5000 (local) | mail-net |
@@ -97,6 +98,9 @@ Other testnet            │                  ▼                          │
 | `TESTNET_MAIL_DOMAINS` *(optional)* | `outlook.com,yahoo.com` | Additional testnet mail domains this server may relay to (comma-separated). Default: empty -- only `MAIL_DOMAIN` is reachable. |
 | `TESTNET_MAIL_RELAYS` *(optional)* | `outlook.com=18.202.0.1:25,yahoo.com=3.4.5.6` | Per-peer SMTP transport routes for the additional testnet mail domains, `domain=ip[:port]` pairs (default port 25). Required for any domain in `TESTNET_MAIL_DOMAINS` you actually want to deliver to. |
 | `API_TOKEN` *(optional)* | `<hex>` | Client API token used to validate `TESTNET_MAIL_DOMAINS` against the live testnet `seed domains` listing at deploy time. Validation is skipped silently if unset. |
+| `GEMINI_API_KEY` *(optional)* | `<api-key>` | **Vertex AI Express Mode** API key for the `mail-classifier` service. Get one from the [Vertex AI Express Mode console](https://console.cloud.google.com/vertex-ai/studio) -- AI Studio Gemini keys are *not* interchangeable here (the SDK uses `genai.Client(vertexai=True, api_key=...)`). Leave empty to skip classification; the classifier container will crash-loop loudly but the rest of the stack stays up and the dashboard falls back to "pending" badges. |
+| `GEMINI_MODEL` *(optional)* | `gemini-2.5-flash-lite` | Gemini model used by the classifier service. |
+| `CLASSIFIER_ACCOUNTS` *(optional)* | `alice@gmail.com:alice-password,bob@gmail.com:bob-password` | Comma-separated IMAP mailbox credentials for the classifier. Defaults to the dashboard demo accounts `alice`, `bob`, `charlie`, and `diana` on `MAIL_DOMAIN`. |
 
 ## Seeded accounts
 
@@ -163,6 +167,17 @@ docker exec mailserver setup email update user@gmail.com newpassword
 ```
 
 No restart required -- Postfix and Dovecot pick up changes within seconds.
+
+## Email classification
+
+The `mail-classifier` service is a lightweight Python worker that:
+
+- logs into configured IMAP mailboxes on `mailserver`
+- inserts unseen messages into a `classifier_emails` table inside the existing Roundcube SQLite database at `/var/roundcube/db/sqlite.db`
+- classifies each new message as `malicious` or `benign` with Gemini using `GEMINI_API_KEY`
+- writes the label and short reason back into the same SQLite database
+
+By default it checks the dashboard demo accounts `alice`, `bob`, `charlie`, and `diana`. Override `CLASSIFIER_ACCOUNTS` if you want it to watch a different mailbox set. IMAP auth failures are logged and skipped so one missing mailbox does not crash the worker.
 
 ## Security
 
@@ -251,6 +266,7 @@ docker exec mailserver doveadm auth test user@gmail.com password
 docker compose -f /opt/testnet-mail/docker-compose.yml logs -f             # All
 docker compose -f /opt/testnet-mail/docker-compose.yml logs -f mailserver   # Mail
 docker compose -f /opt/testnet-mail/docker-compose.yml logs -f roundcube    # Webmail
+docker compose -f /opt/testnet-mail/docker-compose.yml logs -f mail-classifier # Gemini classifier
 docker compose -f /opt/testnet-mail/docker-compose.yml logs -f signup-api   # Signup
 docker compose -f /opt/testnet-mail/docker-compose.yml logs -f dashboard    # Operator dashboard (gunicorn)
 docker compose -f /opt/testnet-mail/docker-compose.yml logs -f docker-proxy # Socket proxy
@@ -270,7 +286,8 @@ docker run --rm \
 
 ```
 deploy/aws-deploy.sh                        Full AWS lifecycle: deploy, teardown, status, ssh, redeploy, restart, logs
-docker-compose.yml                          4 services + 2 isolated networks
+docker-compose.yml                          5 services + 2 isolated networks
+mail-classifier/                            Python Gemini-based email classifier + pytest tests
 mailserver.env                              docker-mailserver config (security features disabled for testnet)
 postfix/postfix-main.cf                     Postfix overrides: testnet-only recipient policy + transport_maps
 postfix/testnet-recipients.pcre.tmpl        Recipient access map template (rendered from MAIL_DOMAIN + TESTNET_MAIL_DOMAINS)

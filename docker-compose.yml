@@ -106,6 +106,28 @@ services:
     restart: unless-stopped
     logging: *default-logging
 
+  mail-classifier:
+    build: ./mail-classifier
+    container_name: mail-classifier
+    environment:
+      - MAIL_DOMAIN=${MAIL_DOMAIN:-gmail.com}
+      - MAILSERVER_HOST=mailserver
+      - MAILSERVER_PORT=143
+      - CLASSIFIER_DB_PATH=/var/roundcube/db/sqlite.db
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash-lite}
+    volumes:
+      - roundcube-db:/var/roundcube/db
+    networks:
+      - mail-net
+    depends_on:
+      mailserver:
+        condition: service_healthy
+      roundcube:
+        condition: service_started
+    restart: unless-stopped
+    logging: *default-logging
+
   docker-proxy:
     image: tecnativa/docker-socket-proxy:0.3
     container_name: docker-proxy
@@ -143,6 +165,10 @@ services:
       - FLASK_ENV=production
       - MAIL_DOMAIN=${MAIL_DOMAIN:-gmail.com}
       - MAILSERVER_HOST=mailserver
+      # CLASSIFIER_DB_PATH: SQLite file (shared volume with roundcube + mail-classifier)
+      # that the dashboard reads classifier_emails rows from to render
+      # benign/malicious badges next to each message.
+      - CLASSIFIER_DB_PATH=/var/roundcube/db/sqlite.db
       # DASHBOARD_PASSWORD: shared operator password used by the dashboard's
       # login form. Required at container start; the app refuses to boot if
       # empty (so a misconfigured deploy doesn't silently expose data).
@@ -152,6 +178,8 @@ services:
       # survive redeploys.
       - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:?DASHBOARD_PASSWORD is required}
       - DASHBOARD_SECRET_KEY=${DASHBOARD_SECRET_KEY:?DASHBOARD_SECRET_KEY is required}
+    volumes:
+      - roundcube-db:/var/roundcube/db
     ports:
       - "127.0.0.1:5000:5000"
     networks:
