@@ -113,15 +113,16 @@ DASHBOARD_SECRET_KEY=$(cat "$DASHBOARD_SECRET_KEY_FILE")
 
 # .env feeds docker compose's variable interpolation. TESTNET_MAIL_DOMAINS,
 # TESTNET_MAIL_RELAYS, ROUNDCUBEMAIL_DES_KEY, DASHBOARD_PASSWORD,
-# DASHBOARD_SECRET_KEY, GEMINI_API_KEY, and GEMINI_MODEL are referenced from
-# docker-compose.yml; pass them through as-is (defaults: empty for the
-# testnet vars, generated values for the keys, operator-supplied for
-# DASHBOARD_PASSWORD and GEMINI_API_KEY).
+# DASHBOARD_SECRET_KEY, GEMINI_API_KEY/MODEL, and OPENROUTER_API_KEY/MODEL
+# are referenced from docker-compose.yml; pass them through as-is (defaults:
+# empty for the testnet vars, generated values for the host-side keys,
+# operator-supplied for DASHBOARD_PASSWORD and one of the LLM keys).
 #
-# GEMINI_API_KEY is optional: leave it empty to skip mail-classifier (the
-# container will crash-loop loudly so the misconfigured state is visible in
-# `docker compose logs`, but the rest of the stack stays up). The dashboard
-# falls back to "pending" badges when no classifications exist.
+# Backend selection is automatic: the mail-classifier picks Gemini or
+# OpenRouter from whichever of GEMINI_API_KEY / OPENROUTER_API_KEY is set
+# (and refuses to start if both are set). Leaving both empty makes the
+# classifier container crash-loop loudly while the rest of the stack stays
+# up; the dashboard then falls back to "pending" badges.
 cat > "$INSTALL_DIR/.env" <<EOF
 MAIL_DOMAIN=${MAIL_DOMAIN}
 TESTNET_MAIL_DOMAINS=${TESTNET_MAIL_DOMAINS:-}
@@ -131,11 +132,17 @@ DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
 DASHBOARD_SECRET_KEY=${DASHBOARD_SECRET_KEY}
 GEMINI_API_KEY=${GEMINI_API_KEY:-}
 GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash-lite}
+OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemini-2.5-flash-lite}
 EOF
 chmod 600 "$INSTALL_DIR/.env"
 
-if [ -z "${GEMINI_API_KEY:-}" ]; then
-  echo "    WARNING: GEMINI_API_KEY not set -- mail-classifier will crash-loop until provided" >&2
+if [ -n "${GEMINI_API_KEY:-}" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; then
+  echo "    ERROR: GEMINI_API_KEY and OPENROUTER_API_KEY are both set -- pick one" >&2
+  exit 1
+fi
+if [ -z "${GEMINI_API_KEY:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+  echo "    WARNING: neither GEMINI_API_KEY nor OPENROUTER_API_KEY set -- mail-classifier will crash-loop until one is provided" >&2
 fi
 
 # ── 3a. Render postfix testnet-only outbound policy ─────────────────────────
@@ -280,19 +287,18 @@ if [ "$status" != "healthy" ]; then
 fi
 
 # Seed the four dashboard test accounts (alice/bob/charlie/diana) plus a
-# handful of sample conversations between them, but only on first deploy.
-# The dashboard's IMAP scrape (dashboard/app.py:TEST_ACCOUNTS) hardcodes
-# these accounts; without them the dashboard renders an empty page after
-# login and operators conclude "nothing happened". We gate on alice's
-# existence so redeploys don't keep re-sending the same canned messages
-# and bloating the inboxes. To re-seed manually, delete the accounts and
-# rerun this script, or call scripts/seed-conversations.sh directly.
-if ! docker exec mailserver setup email list 2>/dev/null | grep -q "alice@${MAIL_DOMAIN}"; then
-  echo "==> Seeding dashboard test accounts and conversations..."
-  MAIL_DOMAIN="$MAIL_DOMAIN" bash "$REPO_DIR/scripts/seed-conversations.sh"
-else
-  echo "==> Dashboard test accounts already present, skipping conversation seed."
-fi
+# handful of sample conversations between them. The dashboard's IMAP scrape
+# (dashboard/app.py:TEST_ACCOUNTS) hardcodes these accounts; without them
+# the dashboard renders an empty page after login and operators conclude
+# "nothing happened".
+#
+# The seed script is idempotent (each send is gated on doveadm-search of
+# the recipient's mailbox for the (from, subject) pair), so we run it on
+# every deploy. That way new example messages added to seed-conversations.sh
+# automatically land on existing deployments after a redeploy without
+# duplicating the conversations that already exist.
+echo "==> Seeding dashboard test accounts and conversations (idempotent)..."
+MAIL_DOMAIN="$MAIL_DOMAIN" bash "$REPO_DIR/scripts/seed-conversations.sh"
 
 echo "==> Starting Roundcube, signup-api, dashboard, and docker-proxy..."
 docker compose up -d
@@ -323,7 +329,13 @@ echo "  Signup:     https://$MAIL_DOMAIN/signup"
 echo "  SMTP:       $PUBLIC_IP:25 (open for testnet nodes)"
 echo ""
 echo "  Seeded accounts: admin, agent, user, noreply @${MAIL_DOMAIN}"
-echo "  Classifier: mail-classifier (uses Roundcube SQLite + Gemini API key)"
+if [ -n "${GEMINI_API_KEY:-}" ]; then
+  echo "  Classifier: mail-classifier (Roundcube SQLite + Gemini, model=${GEMINI_MODEL:-gemini-2.5-flash-lite})"
+elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
+  echo "  Classifier: mail-classifier (Roundcube SQLite + OpenRouter, model=${OPENROUTER_MODEL:-google/gemini-2.5-flash-lite})"
+else
+  echo "  Classifier: mail-classifier DISABLED (set GEMINI_API_KEY or OPENROUTER_API_KEY to enable)"
+fi
 echo ""
 echo "  Add accounts (CLI):"
 echo "    docker exec mailserver setup email add newuser@${MAIL_DOMAIN} password"

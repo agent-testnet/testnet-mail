@@ -1,8 +1,8 @@
 import imaplib
 
-from mail_classifier.config import MailAccount, Settings
+from mail_classifier.classification import ClassificationResult
+from mail_classifier.config import PROVIDER_GEMINI, MailAccount, Settings
 from mail_classifier.db import ClassificationRepository, EmailRecord
-from mail_classifier.gemini import ClassificationResult
 from mail_classifier.imap_sync import IMAPEmailSync
 from mail_classifier.service import MailClassifierService
 
@@ -32,8 +32,8 @@ class FakeSyncer:
         return type("SyncResult", (), {"inserted": inserted, "skipped": 0})()
 
 
-class FakeGeminiClient:
-    model_name = "fake-gemini"
+class FakeClassifierClient:
+    model_name = "fake-classifier"
 
     def classify_email(self, **_: str) -> ClassificationResult:
         return ClassificationResult(
@@ -52,15 +52,16 @@ def test_service_run_once_syncs_and_classifies(tmp_path):
         mailbox="INBOX",
         poll_interval_seconds=1,
         batch_size=10,
-        gemini_api_key="test-key",
-        gemini_model="gemini-2.0-flash",
+        provider=PROVIDER_GEMINI,
+        api_key="test-key",
+        model_name="gemini-2.5-flash-lite",
         accounts=(MailAccount("alice@gmail.com", "alice-password"),),
     )
     service = MailClassifierService(
         settings=settings,
         repository=repository,
         syncer=FakeSyncer(repository),
-        gemini_client=FakeGeminiClient(),
+        classifier_client=FakeClassifierClient(),
     )
 
     result = service.run_once()
@@ -69,7 +70,7 @@ def test_service_run_once_syncs_and_classifies(tmp_path):
     stored = repository.fetch_email(1)
     assert stored is not None
     assert stored["classification_label"] == "malicious"
-    assert stored["classification_model"] == "fake-gemini"
+    assert stored["classification_model"] == "fake-classifier"
     assert tmp_path.joinpath("heartbeat").exists()
 
 
