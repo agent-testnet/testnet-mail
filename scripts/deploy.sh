@@ -330,7 +330,13 @@ echo "  Signup:     https://$MAIL_DOMAIN/signup"
 echo "  SMTP:       $PUBLIC_IP:25 (open for testnet nodes)"
 echo ""
 echo "  Seeded accounts: admin, agent, user, noreply @${MAIL_DOMAIN}"
-echo "  Classifier: mail-classifier (uses Roundcube SQLite + Gemini API key)"
+if [ -n "${GEMINI_API_KEY:-}" ]; then
+  echo "  Classifier: mail-classifier (Roundcube SQLite + Gemini, model=${GEMINI_MODEL:-gemini-2.5-flash-lite})"
+elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
+  echo "  Classifier: mail-classifier (Roundcube SQLite + OpenRouter, model=${OPENROUTER_MODEL:-google/gemini-2.5-flash-lite})"
+else
+  echo "  Classifier: mail-classifier DISABLED (set GEMINI_API_KEY or OPENROUTER_API_KEY to enable)"
+fi
 echo ""
 echo "  Add accounts (CLI):"
 echo "    docker exec mailserver setup email add newuser@${MAIL_DOMAIN} password"
