@@ -6,3 +6,6 @@ backups/
 deploy/.aws-state.json
 deploy/.aws-state.json.tmp
 deploy/.aws-*-key.pem
+*.pyc
+__pycache__/
+.env
