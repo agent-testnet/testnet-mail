@@ -98,9 +98,13 @@ Other testnet            │                  ▼                          │
 | `TESTNET_MAIL_DOMAINS` *(optional)* | `outlook.com,yahoo.com` | Additional testnet mail domains this server may relay to (comma-separated). Default: empty -- only `MAIL_DOMAIN` is reachable. |
 | `TESTNET_MAIL_RELAYS` *(optional)* | `outlook.com=18.202.0.1:25,yahoo.com=3.4.5.6` | Per-peer SMTP transport routes for the additional testnet mail domains, `domain=ip[:port]` pairs (default port 25). Required for any domain in `TESTNET_MAIL_DOMAINS` you actually want to deliver to. |
 | `API_TOKEN` *(optional)* | `<hex>` | Client API token used to validate `TESTNET_MAIL_DOMAINS` against the live testnet `seed domains` listing at deploy time. Validation is skipped silently if unset. |
-| `GEMINI_API_KEY` *(optional)* | `<api-key>` | **Vertex AI Express Mode** API key for the `mail-classifier` service. Get one from the [Vertex AI Express Mode console](https://console.cloud.google.com/vertex-ai/studio) -- AI Studio Gemini keys are *not* interchangeable here (the SDK uses `genai.Client(vertexai=True, api_key=...)`). Leave empty to skip classification; the classifier container will crash-loop loudly but the rest of the stack stays up and the dashboard falls back to "pending" badges. |
-| `GEMINI_MODEL` *(optional)* | `gemini-2.5-flash-lite` | Gemini model used by the classifier service. |
+| `GEMINI_API_KEY` *(pick one)* | `<api-key>` | **Vertex AI Express Mode** API key for the `mail-classifier` service. Get one from the [Vertex AI Express Mode console](https://console.cloud.google.com/vertex-ai/studio) -- AI Studio Gemini keys are *not* interchangeable here (the SDK uses `genai.Client(vertexai=True, api_key=...)`). Mutually exclusive with `OPENROUTER_API_KEY`. |
+| `GEMINI_MODEL` *(optional)* | `gemini-2.5-flash-lite` | Gemini model used by the classifier when `GEMINI_API_KEY` is selected. |
+| `OPENROUTER_API_KEY` *(pick one)* | `sk-or-...` | [OpenRouter](https://openrouter.ai/keys) API key for the `mail-classifier` service. Mutually exclusive with `GEMINI_API_KEY`. Use this if you only have an AI Studio Gemini key, want a different model family, or want to avoid Google Cloud setup. |
+| `OPENROUTER_MODEL` *(optional)* | `google/gemini-2.5-flash-lite` | OpenRouter model id used by the classifier when `OPENROUTER_API_KEY` is selected. Other common picks: `openai/gpt-4o-mini`, `anthropic/claude-3.5-haiku`. See [openrouter.ai/models](https://openrouter.ai/models). |
 | `CLASSIFIER_ACCOUNTS` *(optional)* | `alice@gmail.com:alice-password,bob@gmail.com:bob-password` | Comma-separated IMAP mailbox credentials for the classifier. Defaults to the dashboard demo accounts `alice`, `bob`, `charlie`, and `diana` on `MAIL_DOMAIN`. |
+
+> **Classifier backend selection**: the `mail-classifier` service auto-picks its LLM backend from whichever of `GEMINI_API_KEY` / `OPENROUTER_API_KEY` is set. Setting both is rejected at boot to prevent surprises. Setting neither leaves the classifier in a crash-loop while the rest of the stack stays up; the dashboard then renders "pending" badges next to every message.
 
 ## Seeded accounts
 
@@ -174,10 +178,20 @@ The `mail-classifier` service is a lightweight Python worker that:
 
 - logs into configured IMAP mailboxes on `mailserver`
 - inserts unseen messages into a `classifier_emails` table inside the existing Roundcube SQLite database at `/var/roundcube/db/sqlite.db`
-- classifies each new message as `malicious` or `benign` with Gemini using `GEMINI_API_KEY`
+- classifies each new message as `malicious` or `benign` using either **Vertex AI Gemini** (`GEMINI_API_KEY`) or **OpenRouter** (`OPENROUTER_API_KEY`) -- whichever key is set wins; setting both is rejected at boot
 - writes the label and short reason back into the same SQLite database
 
-By default it checks the dashboard demo accounts `alice`, `bob`, `charlie`, and `diana`. Override `CLASSIFIER_ACCOUNTS` if you want it to watch a different mailbox set. IMAP auth failures are logged and skipped so one missing mailbox does not crash the worker.
+The dashboard reads those rows and renders a `benign` / `malicious` / `pending` badge next to every message, so an operator can see at a glance which accounts are being phished without leaving the chat view.
+
+By default it checks the dashboard demo accounts `alice`, `bob`, `charlie`, and `diana`. Override `CLASSIFIER_ACCOUNTS` if you want it to watch a different mailbox set. IMAP auth failures are logged and skipped so one missing mailbox does not crash the worker. A row that fails classification 5 times in a row is flipped to `failed` to stop the polling loop from burning API quota on a permanently bad message.
+
+### Picking a backend
+
+| You have... | Set | Default model |
+| --- | --- | --- |
+| A Vertex AI Express Mode key | `GEMINI_API_KEY` | `gemini-2.5-flash-lite` |
+| An [OpenRouter](https://openrouter.ai/) key | `OPENROUTER_API_KEY` | `google/gemini-2.5-flash-lite` |
+| Only an AI Studio Gemini key | `OPENROUTER_API_KEY` (route via OpenRouter) or upgrade to a Vertex Express key | -- |
 
 ## Security
 

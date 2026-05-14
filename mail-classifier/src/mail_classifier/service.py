@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from time import sleep
 
+from .classification import ClassifierClient
 from .config import Settings
 from .db import ClassificationRepository
-from .gemini import GeminiClient
 from .imap_sync import IMAPEmailSync
 
 
@@ -15,12 +15,12 @@ class MailClassifierService:
         settings: Settings,
         repository: ClassificationRepository,
         syncer: IMAPEmailSync,
-        gemini_client: GeminiClient,
+        classifier_client: ClassifierClient,
     ) -> None:
         self.settings = settings
         self.repository = repository
         self.syncer = syncer
-        self.gemini_client = gemini_client
+        self.classifier_client = classifier_client
 
     def run_forever(self) -> None:
         while True:
@@ -41,7 +41,7 @@ class MailClassifierService:
         processed = 0
         for email_row in self.repository.pending_emails(self.settings.batch_size):
             try:
-                result = self.gemini_client.classify_email(
+                result = self.classifier_client.classify_email(
                     sender=email_row.sender,
                     recipient=email_row.recipient,
                     subject=email_row.subject,
@@ -51,7 +51,7 @@ class MailClassifierService:
                     email_row.id,
                     result.label,
                     result.reason,
-                    self.gemini_client.model_name,
+                    self.classifier_client.model_name,
                 )
                 processed += 1
             except Exception as exc:
@@ -62,4 +62,3 @@ class MailClassifierService:
         heartbeat = Path(self.settings.heartbeat_path)
         heartbeat.parent.mkdir(parents=True, exist_ok=True)
         heartbeat.write_text("ok\n", encoding="utf-8")
-
