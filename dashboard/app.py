@@ -1,5 +1,19 @@
 import os
-from flask import Flask, render_template, jsonify
+import sys
+import hmac
+import secrets
+from functools import wraps
+from flask import (
+    Flask,
+    render_template,
+    jsonify,
+    request,
+    redirect,
+    url_for,
+    session,
+    make_response,
+    abort,
+)
 from datetime import datetime, timedelta
 import imaplib
 import email
@@ -9,11 +23,71 @@ import re
 from email.utils import parsedate_to_datetime
 import time
 
-app = Flask(__name__)
+# ── Auth configuration (read at module import time) ──────────────────────────
+#
+# Read at import time, not inside `if __name__ == '__main__'`, because the
+# production entrypoint is gunicorn, which imports `app:app` directly and
+# never executes the __main__ block. A misconfigured deploy must fail the
+# worker boot loudly rather than silently serve unauthenticated.
 
-# Configuration
+DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', '')
+DASHBOARD_SECRET_KEY = os.getenv('DASHBOARD_SECRET_KEY', '')
+DASHBOARD_SESSION_HOURS = int(os.getenv('DASHBOARD_SESSION_HOURS', '12'))
+SCRIPT_NAME = os.getenv('SCRIPT_NAME', '/dashboard')
+
+if not DASHBOARD_PASSWORD:
+    print(
+        "FATAL: DASHBOARD_PASSWORD is not set. Refusing to start an unauthenticated dashboard.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+if not DASHBOARD_SECRET_KEY:
+    print(
+        "FATAL: DASHBOARD_SECRET_KEY is not set. Refusing to start without a stable session-signing key.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+# ── Flask app setup ──────────────────────────────────────────────────────────
+
+app = Flask(__name__)
+app.secret_key = DASHBOARD_SECRET_KEY
+app.config.update(
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    # Scope the session cookie to the public dashboard prefix so the browser
+    # never sends it to Roundcube/signup-api on the same hostname.
+    SESSION_COOKIE_PATH=SCRIPT_NAME or '/',
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=DASHBOARD_SESSION_HOURS),
+)
+
+
+# Tell Flask its public URL prefix so url_for(...) emits /dashboard/... links
+# even though nginx strips the prefix before proxying. Without this, nav
+# links and form actions would render as bare /, /login, etc., and 404 at
+# the public edge.
+class PrefixMiddleware:
+    def __init__(self, wsgi_app, prefix):
+        self.wsgi_app = wsgi_app
+        self.prefix = prefix
+
+    def __call__(self, environ, start_response):
+        environ['SCRIPT_NAME'] = self.prefix
+        return self.wsgi_app(environ, start_response)
+
+
+if SCRIPT_NAME:
+    app.wsgi_app = PrefixMiddleware(app.wsgi_app, SCRIPT_NAME)
+
+# ── Mail/account configuration ───────────────────────────────────────────────
+
 MAIL_DOMAIN = os.getenv('MAIL_DOMAIN', 'gmail.com')
-MAILSERVER_HOST = os.getenv('MAILSERVER_HOST', 'mailserver')
+# MAIL_SERVER kept as a backward-compat fallback for the env name previously
+# (mistakenly) set in docker-compose.yml. The compose file now uses
+# MAILSERVER_HOST directly; this fallback can be dropped on the next sweep.
+MAILSERVER_HOST = os.getenv('MAILSERVER_HOST') or os.getenv('MAIL_SERVER') or 'mailserver'
 MAILSERVER_PORT = int(os.getenv('MAILSERVER_PORT', '143'))
 TEST_ACCOUNTS = [
     {"email": f"alice@{MAIL_DOMAIN}", "password": "alice-password"},
@@ -21,6 +95,66 @@ TEST_ACCOUNTS = [
     {"email": f"charlie@{MAIL_DOMAIN}", "password": "charlie-password"},
     {"email": f"diana@{MAIL_DOMAIN}", "password": "diana-password"},
 ]
+
+
+# ── Auth helpers ─────────────────────────────────────────────────────────────
+
+CSRF_COOKIE_NAME = '_csrf'
+
+
+def _csrf_cookie_path():
+    # Path the browser sends the cookie back on. Must match the public URL
+    # of POST /login, which is `${SCRIPT_NAME}/login`.
+    return (SCRIPT_NAME or '') + '/login'
+
+
+def _attach_csrf_cookie(response, token):
+    response.set_cookie(
+        CSRF_COOKIE_NAME,
+        token,
+        max_age=3600,
+        path=_csrf_cookie_path(),
+        secure=True,
+        httponly=True,
+        samesite='Strict',
+    )
+    return response
+
+
+def _valid_csrf():
+    cookie = request.cookies.get(CSRF_COOKIE_NAME, '')
+    form_value = request.form.get(CSRF_COOKIE_NAME, '')
+    if not cookie or not form_value:
+        return False
+    return hmac.compare_digest(cookie, form_value)
+
+
+def _render_login(error, next_target, status=200):
+    """Render the login template with a freshly minted CSRF token attached as a
+    cookie. Both the GET and the failed-POST paths use this helper so the
+    cookie+form contract is set up identically."""
+    token = secrets.token_hex(16)
+    body = render_template(
+        'login.html',
+        error=error,
+        next=next_target,
+        csrf_token=token,
+        active_nav='',
+    )
+    response = make_response(body, status)
+    return _attach_csrf_cookie(response, token)
+
+
+def login_required(view):
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if not session.get('authed'):
+            # script_root + path gives us the public URL (with the
+            # /dashboard prefix re-attached) so the post-login redirect
+            # lands back inside the dashboard rather than at Roundcube's /.
+            return redirect(url_for('login', next=request.script_root + request.path))
+        return view(*args, **kwargs)
+    return wrapper
 
 def connect_imap(email_addr, password):
     """Connect to IMAP server"""
@@ -264,6 +398,7 @@ def get_real_stats():
     }
 
 @app.route('/')
+@login_required
 def index():
     """Main dashboard page"""
     conversations = fetch_conversations()
@@ -274,28 +409,33 @@ def index():
                          active_nav='dashboard')
 
 @app.route('/chat')
+@login_required
 def chat():
     """Chat view page"""
     conversations = fetch_conversations()
     return render_template('chat.html', conversations=conversations, active_nav='chat')
 
 @app.route('/visualize')
+@login_required
 def visualize():
     """3D conversation network view"""
     conversations = fetch_conversations()
     return render_template('visualize.html', conversations=conversations, active_nav='visualize')
 
 @app.route('/api/conversations')
+@login_required
 def api_conversations():
     """API endpoint for conversations"""
     return jsonify(fetch_conversations())
 
 @app.route('/api/stats')
+@login_required
 def api_stats():
     """API endpoint for statistics"""
     return jsonify(get_real_stats())
 
 @app.route('/api/conversation/<int:conversation_id>')
+@login_required
 def api_conversation_detail(conversation_id):
     """API endpoint for specific conversation details"""
     conversations = fetch_conversations()
@@ -303,5 +443,63 @@ def api_conversation_detail(conversation_id):
         return jsonify(conversations[conversation_id])
     return jsonify({"error": "Conversation not found"}), 404
 
+
+# ── Auth routes ──────────────────────────────────────────────────────────────
+
+def _safe_next(target):
+    # Only honour ?next= values that point back inside our SCRIPT_NAME prefix.
+    # Rejects:
+    #   - empty / non-path values
+    #   - protocol-relative URLs (//evil.example/...)
+    #   - absolute paths outside our prefix (e.g. / -> Roundcube,
+    #     /signup -> signup-api), which would otherwise let an attacker
+    #     bounce a logged-in operator to a different vhost service.
+    if not target or not target.startswith('/') or target.startswith('//'):
+        return url_for('index')
+    prefix = SCRIPT_NAME or ''
+    if prefix and not (target == prefix or target.startswith(prefix + '/')):
+        return url_for('index')
+    return target
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Login form (GET) and submission (POST)."""
+    if request.method == 'GET':
+        if session.get('authed'):
+            return redirect(_safe_next(request.args.get('next')))
+        return _render_login(error=None, next_target=request.args.get('next', ''))
+
+    if not _valid_csrf():
+        abort(403, description='Invalid request. Please reload the login page and try again.')
+
+    password = request.form.get('password', '')
+    next_target = request.form.get('next', '')
+
+    if not password or not hmac.compare_digest(password, DASHBOARD_PASSWORD):
+        return _render_login(error='Incorrect password.', next_target=next_target, status=401)
+
+    session.clear()
+    session['authed'] = True
+    session.permanent = True
+    return redirect(_safe_next(next_target))
+
+
+@app.route('/logout', methods=['GET', 'POST'])
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+
+@app.route('/healthz')
+def healthz():
+    """Liveness probe for the docker healthcheck. Intentionally unauthenticated."""
+    return ('ok', 200, {'Content-Type': 'text/plain; charset=utf-8'})
+
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Local-dev entrypoint only. Production uses gunicorn (see Dockerfile),
+    # which imports `app:app` directly and never executes this block. debug=False
+    # because Flask's debugger is dangerous on any reachable interface even
+    # when PIN-protected.
+    app.run(host='0.0.0.0', port=5000, debug=False)
