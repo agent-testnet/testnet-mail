@@ -287,19 +287,18 @@ if [ "$status" != "healthy" ]; then
 fi
 
 # Seed the four dashboard test accounts (alice/bob/charlie/diana) plus a
-# handful of sample conversations between them, but only on first deploy.
-# The dashboard's IMAP scrape (dashboard/app.py:TEST_ACCOUNTS) hardcodes
-# these accounts; without them the dashboard renders an empty page after
-# login and operators conclude "nothing happened". We gate on alice's
-# existence so redeploys don't keep re-sending the same canned messages
-# and bloating the inboxes. To re-seed manually, delete the accounts and
-# rerun this script, or call scripts/seed-conversations.sh directly.
-if ! docker exec mailserver setup email list 2>/dev/null | grep -q "alice@${MAIL_DOMAIN}"; then
-  echo "==> Seeding dashboard test accounts and conversations..."
-  MAIL_DOMAIN="$MAIL_DOMAIN" bash "$REPO_DIR/scripts/seed-conversations.sh"
-else
-  echo "==> Dashboard test accounts already present, skipping conversation seed."
-fi
+# handful of sample conversations between them. The dashboard's IMAP scrape
+# (dashboard/app.py:TEST_ACCOUNTS) hardcodes these accounts; without them
+# the dashboard renders an empty page after login and operators conclude
+# "nothing happened".
+#
+# The seed script is idempotent (each send is gated on doveadm-search of
+# the recipient's mailbox for the (from, subject) pair), so we run it on
+# every deploy. That way new example messages added to seed-conversations.sh
+# automatically land on existing deployments after a redeploy without
+# duplicating the conversations that already exist.
+echo "==> Seeding dashboard test accounts and conversations (idempotent)..."
+MAIL_DOMAIN="$MAIL_DOMAIN" bash "$REPO_DIR/scripts/seed-conversations.sh"
 
 echo "==> Starting Roundcube, signup-api, dashboard, and docker-proxy..."
 docker compose up -d
