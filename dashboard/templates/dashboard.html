@@ -2,16 +2,95 @@
 
 {% block title %}Mail Server Dashboard{% endblock %}
 
+{% block extra_css %}
+<style>
+    #intro-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9000;
+        background: #000;
+        opacity: 1;
+        transition: opacity 0.7s ease;
+    }
+    #intro-overlay.fading { opacity: 0; pointer-events: none; }
+    #intro-canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+    }
+    #intro-title {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        text-align: center;
+        color: #00ff41;
+        font-family: 'Courier New', monospace;
+        text-shadow: 0 0 14px #00ff41, 0 0 30px #008811;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.4s ease;
+    }
+    #intro-title.show { opacity: 1; }
+    #intro-title .big { font-size: 42px; font-weight: bold; letter-spacing: 4px; }
+    #intro-title .sub { font-size: 13px; letter-spacing: 2px; color: #39ff7a; margin-top: 8px; }
+    #intro-skip {
+        position: absolute;
+        bottom: 24px;
+        right: 24px;
+        background: rgba(0, 10, 0, 0.6);
+        border: 1px solid #00ff41;
+        color: #00ff41;
+        font-family: 'Courier New', monospace;
+        font-size: 12px;
+        letter-spacing: 1px;
+        padding: 6px 14px;
+        cursor: pointer;
+        backdrop-filter: blur(4px);
+    }
+    #intro-skip:hover {
+        background: rgba(0, 60, 0, 0.7);
+        box-shadow: 0 0 12px rgba(0, 255, 65, 0.4);
+    }
+</style>
+{% endblock %}
+
 {% block content %}
+<div id="intro-overlay">
+    <canvas id="intro-canvas"></canvas>
+    <div id="intro-title">
+        <div class="big">TESTNET.MAIL</div>
+        <div class="sub">&gt; INITIALIZING NETWORK...</div>
+    </div>
+    <button id="intro-skip" type="button">SKIP &gt;&gt;</button>
+</div>
+
+<script type="application/json" id="dashboard-conv-data">{{ conversations | tojson }}</script>
+
 <div class="container mx-auto px-4 py-8">
     <!-- Header -->
-    <div class="matrix-header mb-8 p-6 rounded-lg">
-        <h1 class="text-4xl font-bold matrix-glow mb-2">⚡ MAIL SERVER DASHBOARD ⚡</h1>
-        <p class="text-matrix-light-green text-sm">Real-time conversation analysis | System monitoring</p>
+    <div class="matrix-header mb-6 p-6 rounded-lg">
+        <h1 class="text-4xl font-bold matrix-glow mb-2">&gt; MAIL_SERVER_DASHBOARD</h1>
+        <p class="text-matrix-light-green text-sm">Real-time conversation analysis · System monitoring</p>
         <div class="mt-4 text-xs text-matrix-dark-green">
-            [SYSTEM ONLINE] | [DATA STREAM ACTIVE] | [CONVERSATIONS MONITORED: {{ stats.total_conversations }}]
+            [SYSTEM ONLINE] · [DATA STREAM ACTIVE] · [CONVERSATIONS MONITORED: {{ stats.total_conversations }}]
         </div>
     </div>
+
+    <!-- 3D Tracker CTA -->
+    <a href="/visualize" class="block matrix-card rounded-lg p-5 mb-8 matrix-hover"
+       style="text-decoration: none; color: inherit;">
+        <div class="flex items-center justify-between">
+            <div>
+                <div class="text-matrix-light-green text-xs font-mono">&gt; ENTER_NETWORK</div>
+                <div class="text-2xl font-bold matrix-glow mt-1">TRACK CONVERSATIONS IN 3D &rarr;</div>
+                <div class="text-xs text-matrix-dark-green mt-1">Interactive node graph &middot; drag &middot; zoom &middot; click to inspect</div>
+            </div>
+            <div class="text-5xl matrix-glow" style="line-height:1;">◉</div>
+        </div>
+    </a>
 
     <!-- Statistics Section -->
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
@@ -123,6 +202,95 @@
 {% endblock %}
 
 {% block scripts %}
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import { buildNetworkScene } from "{{ url_for('static', filename='js/network-scene.js') }}";
+
+const overlay = document.getElementById('intro-overlay');
+const canvas  = document.getElementById('intro-canvas');
+const title   = document.getElementById('intro-title');
+const skipBtn = document.getElementById('intro-skip');
+
+const data = JSON.parse(document.getElementById('dashboard-conv-data').textContent);
+
+if (data.length === 0) {
+    overlay.remove();
+} else {
+    runIntro();
+}
+
+function runIntro() {
+    const scene = buildNetworkScene(canvas, data, {
+        useOrbitControls: false, labels: false, halos: true,
+    });
+    const { THREE, camera, nodes, edges, R, start, stop, setTick } = scene;
+
+    nodes.forEach(n => { n.material.emissiveIntensity = 1.1; });
+    edges.forEach(e => { e.material.opacity = Math.min(1, e.userData.baseOpacity + 0.25); });
+
+    const path = new THREE.CatmullRomCurve3([
+        new THREE.Vector3(-R * 4.0,  R * 2.5,  R * 4.5),
+        new THREE.Vector3(-R * 1.8,  R * 1.0,  R * 1.8),
+        new THREE.Vector3(-R * 0.3,  R * 0.1,  R * 0.4),
+        new THREE.Vector3( R * 0.8, -R * 0.3, -R * 0.8),
+        new THREE.Vector3( R * 2.0,  R * 0.4, -R * 2.5),
+        new THREE.Vector3( R * 1.2,  R * 1.0,  R * 3.0),
+    ]);
+
+    const DURATION  = 3800;
+    const TITLE_IN  = 800;
+    const TITLE_OUT = 2800;
+    const FADE_AT   = 3100;
+    const t0 = performance.now();
+    const targetTmp = new THREE.Vector3();
+    let fading = false;
+    let dismissed = false;
+
+    function dismiss() {
+        if (dismissed) return;
+        dismissed = true;
+        overlay.classList.add('fading');
+        setTimeout(() => { stop(); overlay.remove(); }, 750);
+    }
+
+    setTick(() => {
+        const elapsed = performance.now() - t0;
+        const t = Math.min(1, elapsed / DURATION);
+        const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        path.getPoint(eased, camera.position);
+
+        targetTmp.set(
+            Math.sin(eased * Math.PI) * R * 0.4,
+            Math.cos(eased * Math.PI * 1.3) * R * 0.3,
+            -eased * R * 0.6
+        );
+        camera.lookAt(targetTmp);
+
+        if (elapsed > TITLE_IN && elapsed < TITLE_OUT) title.classList.add('show');
+        else title.classList.remove('show');
+
+        if (!fading && elapsed > FADE_AT) {
+            fading = true;
+            overlay.classList.add('fading');
+        }
+        if (elapsed > DURATION + 400) dismiss();
+    });
+
+    skipBtn.addEventListener('click', dismiss);
+    overlay.addEventListener('click', e => { if (e.target === overlay) dismiss(); });
+
+    start();
+}
+</script>
+
 <script>
     // Chart.js color scheme
     const chartColors = {

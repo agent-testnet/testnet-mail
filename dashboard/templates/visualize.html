@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+
+{% block title %}3D Network - Mail Server{% endblock %}
+
+{% block extra_css %}
+<style>
+    .viz-wrap {
+        position: relative;
+        height: calc(100vh - 56px);
+        width: 100%;
+        overflow: hidden;
+    }
+    #viz-canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+    }
+    .viz-panel {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        width: 320px;
+        max-height: 75vh;
+        overflow-y: auto;
+        background: rgba(0, 10, 0, 0.85);
+        border: 1px solid #00ff41;
+        box-shadow: 0 0 25px rgba(0, 255, 65, 0.25);
+        padding: 16px;
+        color: #00ff41;
+        font-size: 12px;
+        backdrop-filter: blur(4px);
+        z-index: 5;
+    }
+    .viz-legend {
+        position: absolute;
+        bottom: 20px;
+        right: 20px;
+        background: rgba(0, 10, 0, 0.85);
+        border: 1px solid #00ff41;
+        padding: 10px 14px;
+        font-size: 11px;
+        color: #39ff7a;
+        backdrop-filter: blur(4px);
+        line-height: 1.7;
+        z-index: 5;
+    }
+    .viz-tooltip {
+        position: fixed;
+        background: rgba(0,0,0,0.92);
+        border: 1px solid #00ff41;
+        color: #00ff41;
+        padding: 4px 8px;
+        font-size: 12px;
+        pointer-events: none;
+        display: none;
+        z-index: 100;
+        text-shadow: 0 0 6px #00ff41;
+    }
+    .conv-pill {
+        display: block;
+        padding: 8px 10px;
+        margin: 6px 0;
+        border: 1px solid #008f11;
+        background: rgba(0, 30, 0, 0.6);
+        color: #39ff7a;
+        text-decoration: none;
+        transition: all 0.15s ease;
+    }
+    .conv-pill:hover {
+        border-color: #00ff41;
+        background: rgba(0, 60, 0, 0.7);
+        box-shadow: 0 0 12px rgba(0,255,65,0.35);
+    }
+    .panel-h {
+        font-weight: bold;
+        color: #00ff41;
+        text-shadow: 0 0 8px #00ff41;
+        letter-spacing: 1px;
+        margin-bottom: 8px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="viz-wrap">
+    <canvas id="viz-canvas"></canvas>
+
+    <div class="viz-panel" id="viz-panel">
+        <div class="panel-h">&gt; NETWORK_GRAPH</div>
+        <div class="text-xs text-matrix-light-green mb-3" style="line-height:1.6;">
+            Drag to rotate · scroll to zoom · click a node to inspect.
+        </div>
+        <div id="viz-detail">
+            <div class="text-matrix-dark-green text-xs">// no node selected</div>
+        </div>
+    </div>
+
+    <div class="viz-legend">
+        <div><span style="color:#00ff41;">●</span> node = user</div>
+        <div><span style="color:#00ff41;">―</span> edge = conversation</div>
+        <div>opacity &prop; message count</div>
+    </div>
+
+    <div class="viz-tooltip" id="viz-tooltip"></div>
+</div>
+
+<script type="application/json" id="conv-data">{{ conversations | tojson }}</script>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import { buildNetworkScene } from "{{ url_for('static', filename='js/network-scene.js') }}";
+
+const data = JSON.parse(document.getElementById('conv-data').textContent);
+const canvas = document.getElementById('viz-canvas');
+const tooltip = document.getElementById('viz-tooltip');
+const detailEl = document.getElementById('viz-detail');
+
+const { THREE, camera, controls, nodes, edges, start } =
+    buildNetworkScene(canvas, data, { useOrbitControls: true, autoRotate: true });
+
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let hovered = null;
+let selectedEmail = null;
+
+canvas.addEventListener('pointermove', e => {
+    const rect = canvas.getBoundingClientRect();
+    pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObjects(nodes);
+    if (hits.length) {
+        hovered = hits[0].object;
+        tooltip.textContent = hovered.userData.email;
+        tooltip.style.left = (e.clientX + 12) + 'px';
+        tooltip.style.top  = (e.clientY + 12) + 'px';
+        tooltip.style.display = 'block';
+        canvas.style.cursor = 'pointer';
+    } else {
+        hovered = null;
+        tooltip.style.display = 'none';
+        canvas.style.cursor = 'default';
+    }
+});
+
+canvas.addEventListener('click', () => {
+    if (!hovered) {
+        selectedEmail = null;
+        resetHighlights();
+        detailEl.innerHTML = '<div class="text-matrix-dark-green text-xs">// no node selected</div>';
+        return;
+    }
+    selectedEmail = hovered.userData.email;
+    renderDetail(selectedEmail);
+});
+
+function resetHighlights() {
+    nodes.forEach(n => { n.material.emissiveIntensity = n.userData.baseIntensity; });
+    edges.forEach(e => { e.material.opacity = e.userData.baseOpacity; });
+}
+
+function escapeHTML(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    })[c]);
+}
+
+function renderDetail(email) {
+    const convs = data.filter(c => c.sender === email || c.receiver === email);
+    const totalMsgs = convs.reduce((s, c) => s + c.message_count, 0);
+    const lines = [
+        `<div class="text-matrix-green font-bold mb-2 matrix-glow">${escapeHTML(email)}</div>`,
+        `<div class="text-xs text-matrix-light-green mb-3">${convs.length} thread(s) · ${totalMsgs} message(s)</div>`,
+    ];
+    convs.forEach(c => {
+        const other = c.sender === email ? c.receiver : c.sender;
+        lines.push(`<a class="conv-pill" href="/chat?conv=${c.id}">
+            <div>&rarr; ${escapeHTML(other)}</div>
+            <div class="text-xs text-matrix-dark-green">${c.message_count} msg(s) · thread #${c.id}</div>
+        </a>`);
+    });
+    detailEl.innerHTML = lines.join('');
+
+    nodes.forEach(n => {
+        n.material.emissiveIntensity = n.userData.email === email ? 1.6 : 0.25;
+    });
+    edges.forEach(e => {
+        const c = e.userData.conv;
+        const involved = c.sender === email || c.receiver === email;
+        e.material.opacity = involved ? 0.95 : 0.08;
+    });
+}
+
+start();
+
+['pointerdown', 'wheel'].forEach(ev =>
+    canvas.addEventListener(ev, () => { controls.autoRotate = false; }, { once: true })
+);
+</script>
+{% endblock %}

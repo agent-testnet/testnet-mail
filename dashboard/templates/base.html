@@ -11,12 +11,12 @@
             theme: {
                 colors: {
                     'matrix-black': '#000000',
-                    'matrix-green': '#00ff00',
-                    'matrix-dark-green': '#00cc00',
-                    'matrix-light-green': '#00ff88',
-                    'matrix-bg': '#0a0e27',
-                    'matrix-border': '#1a2332',
-                    'matrix-text': '#00ff00',
+                    'matrix-green': '#00ff41',
+                    'matrix-dark-green': '#008f11',
+                    'matrix-light-green': '#39ff7a',
+                    'matrix-bg': '#020a02',
+                    'matrix-border': '#0d3b0d',
+                    'matrix-text': '#00ff41',
                 }
             }
         }
@@ -25,64 +25,180 @@
         * {
             font-family: 'Courier New', monospace;
         }
+        html { background: #000; }
         body {
-            background: linear-gradient(135deg, #000000 0%, #0a0e27 50%, #000000 100%);
-            color: #00ff00;
+            background: transparent;
+            color: #00ff41;
             overflow-x: hidden;
+            margin: 0;
         }
+        /* Digital rain canvas: lowest visible layer. */
+        #matrix-rain {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 0;
+            pointer-events: none;
+        }
+        /* Subtle vignette so center content stays legible without hiding the rain. */
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            z-index: 1;
+            background:
+                radial-gradient(ellipse at center, rgba(0,0,0,0) 0%, rgba(0,0,0,0.45) 75%, rgba(0,0,0,0.7) 100%);
+            pointer-events: none;
+        }
+
         .matrix-glow {
-            text-shadow: 0 0 10px #00ff00, 0 0 20px #00aa00, 0 0 30px #008800;
+            text-shadow: 0 0 10px #00ff41, 0 0 20px #00aa22, 0 0 30px #008811;
         }
-        .matrix-border {
-            border-color: #00ff00;
-            border-style: solid;
-        }
-        .matrix-bg {
-            background-color: rgba(0, 20, 0, 0.6);
-        }
+        .matrix-border { border-color: #00ff41; border-style: solid; }
+        .matrix-bg { background-color: rgba(0, 20, 0, 0.55); }
         .matrix-hover:hover {
-            background-color: rgba(0, 50, 0, 0.8);
-            box-shadow: inset 0 0 20px rgba(0, 255, 0, 0.2);
+            background-color: rgba(0, 50, 0, 0.7);
+            box-shadow: inset 0 0 20px rgba(0, 255, 65, 0.25);
             transform: scale(1.02);
             transition: all 0.3s ease;
         }
         .matrix-input {
             background-color: rgba(0, 20, 0, 0.8);
-            border: 1px solid #00ff00;
-            color: #00ff00;
+            border: 1px solid #00ff41;
+            color: #00ff41;
         }
         .matrix-input:focus {
-            box-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
+            box-shadow: 0 0 20px rgba(0, 255, 65, 0.5);
             outline: none;
         }
         .matrix-card {
-            background-color: rgba(0, 20, 0, 0.6);
-            border: 2px solid #00ff00;
-            box-shadow: 0 0 20px rgba(0, 255, 0, 0.1);
+            background-color: rgba(0, 20, 0, 0.55);
+            border: 1px solid #00ff41;
+            box-shadow: 0 0 25px rgba(0, 255, 65, 0.15), inset 0 0 30px rgba(0, 60, 0, 0.25);
+            backdrop-filter: blur(2px);
         }
         .matrix-header {
-            background: linear-gradient(90deg, rgba(0, 255, 0, 0.1) 0%, rgba(0, 100, 0, 0.1) 50%, rgba(0, 255, 0, 0.1) 100%);
-            border-bottom: 2px solid #00ff00;
+            background: linear-gradient(90deg, rgba(0, 255, 65, 0.08) 0%, rgba(0, 100, 0, 0.08) 50%, rgba(0, 255, 65, 0.08) 100%);
+            border-bottom: 1px solid #00ff41;
+            backdrop-filter: blur(3px);
         }
         .stat-box {
-            background-color: rgba(0, 30, 0, 0.7);
-            border-left: 4px solid #00ff00;
+            background-color: rgba(0, 30, 0, 0.6);
+            border-left: 3px solid #00ff41;
+            backdrop-filter: blur(2px);
         }
         .chart-container {
             position: relative;
             height: 300px;
-            background-color: rgba(0, 20, 0, 0.6);
-            border: 2px solid #00ff00;
+            background-color: rgba(0, 20, 0, 0.55);
+            border: 1px solid #00ff41;
             border-radius: 4px;
             padding: 20px;
         }
+
+        /* Top nav */
+        .nav-bar {
+            position: sticky;
+            top: 0;
+            z-index: 50;
+            background: rgba(0, 10, 0, 0.85);
+            border-bottom: 1px solid #00ff41;
+            backdrop-filter: blur(6px);
+        }
+        .nav-bar a {
+            color: #39ff7a;
+            text-decoration: none;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            letter-spacing: 1px;
+            padding: 6px 12px;
+            border: 1px solid transparent;
+            border-radius: 3px;
+            transition: all 0.15s ease;
+        }
+        .nav-bar a:hover {
+            border-color: #00ff41;
+            box-shadow: 0 0 12px rgba(0, 255, 65, 0.4);
+            color: #00ff41;
+        }
+        .nav-bar a.active {
+            border-color: #00ff41;
+            background: rgba(0, 255, 65, 0.1);
+            color: #00ff41;
+            text-shadow: 0 0 8px #00ff41;
+        }
+        .nav-brand {
+            font-weight: bold;
+            color: #00ff41;
+            text-shadow: 0 0 10px #00ff41;
+            letter-spacing: 2px;
+        }
+        .nav-cursor::after {
+            content: "_";
+            animation: blink 1s steps(2, start) infinite;
+        }
+        @keyframes blink { to { visibility: hidden; } }
     </style>
     {% block extra_css %}{% endblock %}
 </head>
-<body class="bg-matrix-black">
-    <div class="min-h-screen">
+<body>
+    <canvas id="matrix-rain"></canvas>
+
+    <nav class="nav-bar px-6 py-3 flex items-center justify-between" style="position: sticky; top: 0; z-index: 50;">
+        <div class="nav-brand text-sm md:text-base">
+            <span>::</span> TESTNET.MAIL <span class="nav-cursor"></span>
+        </div>
+        <div class="flex items-center gap-2">
+            <a href="/"          class="{% if active_nav == 'dashboard' %}active{% endif %}">DASHBOARD</a>
+            <a href="/visualize" class="{% if active_nav == 'visualize' %}active{% endif %}">3D&nbsp;NETWORK</a>
+            <a href="/chat"      class="{% if active_nav == 'chat' %}active{% endif %}">CHAT</a>
+        </div>
+    </nav>
+
+    <div class="min-h-screen relative" style="z-index: 2;">
         {% block content %}{% endblock %}
     </div>
+
+    <script>
+        // Matrix digital rain — runs on every page.
+        (function () {
+            const canvas = document.getElementById('matrix-rain');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const glyphs = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝ0123456789@:#$%&'.split('');
+            const fontSize = 16;
+            let columns, drops;
+
+            function resize() {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+                columns = Math.floor(canvas.width / fontSize);
+                drops = new Array(columns).fill(0).map(() => Math.random() * -canvas.height);
+            }
+            window.addEventListener('resize', resize);
+            resize();
+
+            function draw() {
+                // Faint black overlay creates the trailing-fade effect.
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.07)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                ctx.font = fontSize + "px 'Courier New', monospace";
+                for (let i = 0; i < drops.length; i++) {
+                    const ch = glyphs[Math.floor(Math.random() * glyphs.length)];
+                    const x = i * fontSize;
+                    const y = drops[i];
+                    // Head of the column is brighter.
+                    ctx.fillStyle = Math.random() > 0.975 ? '#e8ffe8' : '#00ff41';
+                    ctx.fillText(ch, x, y);
+                    drops[i] = y > canvas.height && Math.random() > 0.975 ? 0 : y + fontSize;
+                }
+                requestAnimationFrame(draw);
+            }
+            draw();
+        })();
+    </script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

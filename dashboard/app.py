@@ -268,15 +268,22 @@ def index():
     """Main dashboard page"""
     conversations = fetch_conversations()
     stats = get_real_stats()
-    return render_template('dashboard.html', 
+    return render_template('dashboard.html',
                          conversations=conversations,
-                         stats=stats)
+                         stats=stats,
+                         active_nav='dashboard')
 
 @app.route('/chat')
 def chat():
     """Chat view page"""
     conversations = fetch_conversations()
-    return render_template('chat.html', conversations=conversations)
+    return render_template('chat.html', conversations=conversations, active_nav='chat')
+
+@app.route('/visualize')
+def visualize():
+    """3D conversation network view"""
+    conversations = fetch_conversations()
+    return render_template('visualize.html', conversations=conversations, active_nav='visualize')
 
 @app.route('/api/conversations')
 def api_conversations():
