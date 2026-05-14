@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+MAX_CLASSIFICATION_ATTEMPTS = int(os.getenv("CLASSIFIER_MAX_ATTEMPTS", "5"))
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,11 @@ class ClassificationRepository:
 
     def initialize(self) -> None:
         with self._connect() as conn:
+            # WAL lets the dashboard (read-only SELECTs) run concurrently with
+            # the classifier's writes against this same SQLite file, and also
+            # avoids "database is locked" errors when the roundcube container
+            # writes its own session/cache tables on the shared volume.
+            conn.execute("PRAGMA journal_mode=WAL;")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS classifier_emails (
@@ -122,10 +130,11 @@ class ClassificationRepository:
                 SELECT id, sender, recipient, subject, body_text
                 FROM classifier_emails
                 WHERE classification_status = 'pending'
+                  AND classification_attempts < ?
                 ORDER BY id ASC
                 LIMIT ?
                 """,
-                (limit,),
+                (MAX_CLASSIFICATION_ATTEMPTS, limit),
             ).fetchall()
         return [
             PendingEmail(
@@ -159,16 +168,26 @@ class ClassificationRepository:
             )
 
     def record_classification_error(self, email_id: int, error_message: str) -> None:
+        # Bump the attempt counter and, once we've burned through the budget,
+        # flip status to 'failed' so the pending_emails() query stops handing
+        # this row out on every poll cycle. Without this guard a permanently
+        # bad row (Gemini quota exhausted, content blocked, malformed body,
+        # etc.) gets re-pulled every poll_interval_seconds forever, burning
+        # API quota and dollars.
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE classifier_emails
                 SET classification_attempts = classification_attempts + 1,
                     last_error = ?,
+                    classification_status = CASE
+                        WHEN classification_attempts + 1 >= ? THEN 'failed'
+                        ELSE classification_status
+                    END,
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (error_message, utcnow_iso(), email_id),
+                (error_message, MAX_CLASSIFICATION_ATTEMPTS, utcnow_iso(), email_id),
             )
 
     def fetch_email(self, email_id: int) -> sqlite3.Row | None:

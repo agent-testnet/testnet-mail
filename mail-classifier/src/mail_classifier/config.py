@@ -69,7 +69,7 @@ def load_settings() -> Settings:
         poll_interval_seconds=int(os.getenv("CLASSIFIER_POLL_INTERVAL_SECONDS", "15")),
         batch_size=int(os.getenv("CLASSIFIER_BATCH_SIZE", "10")),
         gemini_api_key=gemini_api_key,
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
         accounts=_parse_accounts(
             os.getenv("CLASSIFIER_ACCOUNTS"),
             os.getenv("MAIL_DOMAIN", "gmail.com"),

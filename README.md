@@ -98,8 +98,8 @@ Other testnet            │                  ▼                          │
 | `TESTNET_MAIL_DOMAINS` *(optional)* | `outlook.com,yahoo.com` | Additional testnet mail domains this server may relay to (comma-separated). Default: empty -- only `MAIL_DOMAIN` is reachable. |
 | `TESTNET_MAIL_RELAYS` *(optional)* | `outlook.com=18.202.0.1:25,yahoo.com=3.4.5.6` | Per-peer SMTP transport routes for the additional testnet mail domains, `domain=ip[:port]` pairs (default port 25). Required for any domain in `TESTNET_MAIL_DOMAINS` you actually want to deliver to. |
 | `API_TOKEN` *(optional)* | `<hex>` | Client API token used to validate `TESTNET_MAIL_DOMAINS` against the live testnet `seed domains` listing at deploy time. Validation is skipped silently if unset. |
-| `GEMINI_API_KEY` *(required for mail classifier)* | `<api-key>` | Gemini API key used by the `mail-classifier` service. This uses a direct API key, not Google JSON credentials. |
-| `GEMINI_MODEL` *(optional)* | `gemini-2.0-flash` | Gemini model used by the classifier service. |
+| `GEMINI_API_KEY` *(optional)* | `<api-key>` | **Vertex AI Express Mode** API key for the `mail-classifier` service. Get one from the [Vertex AI Express Mode console](https://console.cloud.google.com/vertex-ai/studio) -- AI Studio Gemini keys are *not* interchangeable here (the SDK uses `genai.Client(vertexai=True, api_key=...)`). Leave empty to skip classification; the classifier container will crash-loop loudly but the rest of the stack stays up and the dashboard falls back to "pending" badges. |
+| `GEMINI_MODEL` *(optional)* | `gemini-2.5-flash-lite` | Gemini model used by the classifier service. |
 | `CLASSIFIER_ACCOUNTS` *(optional)* | `alice@gmail.com:alice-password,bob@gmail.com:bob-password` | Comma-separated IMAP mailbox credentials for the classifier. Defaults to the dashboard demo accounts `alice`, `bob`, `charlie`, and `diana` on `MAIL_DOMAIN`. |
 
 ## Seeded accounts
