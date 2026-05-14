@@ -2,6 +2,7 @@ import os
 import sys
 import hmac
 import secrets
+import sqlite3
 from functools import wraps
 from flask import (
     Flask,
@@ -89,6 +90,7 @@ MAIL_DOMAIN = os.getenv('MAIL_DOMAIN', 'gmail.com')
 # MAILSERVER_HOST directly; this fallback can be dropped on the next sweep.
 MAILSERVER_HOST = os.getenv('MAILSERVER_HOST') or os.getenv('MAIL_SERVER') or 'mailserver'
 MAILSERVER_PORT = int(os.getenv('MAILSERVER_PORT', '143'))
+CLASSIFIER_DB_PATH = os.getenv('CLASSIFIER_DB_PATH', '/var/roundcube/db/sqlite.db')
 TEST_ACCOUNTS = [
     {"email": f"alice@{MAIL_DOMAIN}", "password": "alice-password"},
     {"email": f"bob@{MAIL_DOMAIN}", "password": "bob-password"},
@@ -250,11 +252,46 @@ def parse_email_date(date_str):
     print(f"✗ Could not parse date: {date_str}, using current time")
     return datetime.now()
 
+def load_classifications(message_refs):
+    """Load LLM classifications keyed by mailbox owner + Message-ID."""
+    refs = {(account_email, message_id) for account_email, message_id in message_refs if message_id}
+    if not refs:
+        return {}
+
+    placeholders = ", ".join(["(?, ?)"] * len(refs))
+    params = []
+    for account_email, message_id in refs:
+        params.extend([account_email, message_id])
+
+    try:
+        with sqlite3.connect(CLASSIFIER_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"""
+                SELECT account_email, message_id, classification_status, classification_label
+                FROM classifier_emails
+                WHERE (account_email, message_id) IN ({placeholders})
+                """,
+                params,
+            ).fetchall()
+    except sqlite3.Error as e:
+        print(f"Failed to load classifications from {CLASSIFIER_DB_PATH}: {e}")
+        return {}
+
+    return {
+        (row["account_email"], row["message_id"]): {
+            "status": row["classification_status"],
+            "label": row["classification_label"] or "",
+        }
+        for row in rows
+    }
+
 def fetch_conversations():
     """Fetch real conversations from mailserver"""
     conversations = defaultdict(lambda: {"messages": [], "participants": set(), "message_ids": set()})
     conv_id = 0
     conv_map = {}
+    message_refs = []
     
     for account in TEST_ACCOUNTS:
         email_addr = account["email"].lower()
@@ -320,8 +357,11 @@ def fetch_conversations():
                         
                         if message_id:
                             conversations[conv_idx]["message_ids"].add(message_id)
+                            message_refs.append((email_addr, message_id))
                         
                         conversations[conv_idx]["messages"].append({
+                            "account_email": email_addr,
+                            "message_id": message_id,
                             "sender": sender_email,
                             "text": body,
                             "timestamp": dt.isoformat(),
@@ -337,6 +377,8 @@ def fetch_conversations():
                 imap.close()
             except:
                 pass
+
+    classifications = load_classifications(message_refs)
     
     # Format conversations - ensure we always have valid participants
     result = []
@@ -345,6 +387,11 @@ def fetch_conversations():
             participants = sorted(list(conv_data["participants"]))
             # Only include conversations with at least 2 participants
             if len(participants) >= 2:
+                for msg in conv_data["messages"]:
+                    classification = classifications.get((msg["account_email"], msg["message_id"]), {})
+                    msg["classification_status"] = classification.get("status", "pending")
+                    msg["classification_label"] = classification.get("label", "")
+
                 # Sort messages by timestamp to maintain conversation order
                 sorted_messages = sorted(conv_data["messages"], key=lambda x: x["timestamp"])
                 print(f"Conversation {conv_id}: {participants[0]} ↔ {participants[1]}")
