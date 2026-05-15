@@ -58,6 +58,48 @@
         z-index: 100;
         text-shadow: 0 0 6px #00ff41;
     }
+    /* CRT flash + scanline-wipe shown while zooming into a card. The overlay
+       is animated entirely from JS — these are just the look. */
+    .viz-flash {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 50;
+        opacity: 0;
+        background:
+            radial-gradient(circle at center,
+                rgba(0, 255, 65, 0.55) 0%,
+                rgba(0, 255, 65, 0.18) 35%,
+                rgba(0, 0, 0, 0)        70%),
+            repeating-linear-gradient(
+                0deg,
+                rgba(0, 255, 65, 0.12) 0px,
+                rgba(0, 255, 65, 0.12) 1px,
+                transparent 1px,
+                transparent 4px
+            );
+        mix-blend-mode: screen;
+    }
+    .viz-flash::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(
+            180deg,
+            transparent 0%,
+            rgba(0,255,65,0.6) 50%,
+            transparent 100%
+        );
+        transform: translateY(-100%);
+        transition: none;
+    }
+    .viz-flash.is-firing::after {
+        animation: viz-scanwipe 520ms ease-in forwards;
+    }
+    @keyframes viz-scanwipe {
+        from { transform: translateY(-100%); }
+        to   { transform: translateY(100%); }
+    }
     .conv-pill {
         display: block;
         padding: 8px 10px;
@@ -90,7 +132,8 @@
     <div class="viz-panel" id="viz-panel">
         <div class="panel-h">&gt; NETWORK_GRAPH</div>
         <div class="text-xs text-matrix-light-green mb-3" style="line-height:1.6;">
-            Drag to rotate · scroll to zoom · click a node to inspect.
+            Drag to rotate · scroll to zoom · click a node to summon floating
+            email windows. Click a window to open the thread.
         </div>
         <div id="viz-detail">
             <div class="text-matrix-dark-green text-xs">// no node selected</div>
@@ -100,10 +143,12 @@
     <div class="viz-legend">
         <div><span style="color:#00ff41;">●</span> node = user</div>
         <div><span style="color:#00ff41;">―</span> edge = conversation</div>
-        <div>opacity &prop; message count</div>
+        <div><span style="color:#00ff41;">▢</span> window = email preview</div>
+        <div>click node &rarr; spawn windows</div>
     </div>
 
     <div class="viz-tooltip" id="viz-tooltip"></div>
+    <div class="viz-flash" id="viz-flash"></div>
 </div>
 
 <script type="application/json" id="conv-data">{{ conversations | tojson }}</script>
@@ -130,44 +175,513 @@ const data = JSON.parse(document.getElementById('conv-data').textContent);
 const canvas = document.getElementById('viz-canvas');
 const tooltip = document.getElementById('viz-tooltip');
 const detailEl = document.getElementById('viz-detail');
+const flashEl = document.getElementById('viz-flash');
 
-const { THREE, camera, controls, nodes, edges, start } =
+const { THREE, scene, camera, controls, nodes, edges, setTick, start } =
     buildNetworkScene(canvas, data, { useOrbitControls: true, autoRotate: true });
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
-let hovered = null;
+let hoveredNode = null;
+let hoveredCard = null;
 let selectedEmail = null;
+
+// Container for all floating email-preview windows + their tethers, so we
+// can swap them out in one shot when the user picks a different node.
+const windowGroup = new THREE.Group();
+scene.add(windowGroup);
+const emailCards = [];
+
+// ---------------------------------------------------------------------------
+// Email-card texture: a Matrix-style terminal "envelope" drawn to a 2D canvas
+// and uploaded as a THREE.CanvasTexture. The card is later mapped onto a
+// PlaneGeometry that billboards to the camera.
+// ---------------------------------------------------------------------------
+function makeEmailCardTexture(msg, index, conv) {
+    const W = 512, H = 288;
+    const cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    const c = cv.getContext('2d');
+
+    // Recipient isn't stored on the message itself — it's the other party in
+    // the 2-participant conversation. Fall back to the conv id label if for
+    // some reason the sender doesn't match either endpoint.
+    let recipient = '';
+    if (conv) {
+        if (conv.sender === msg.sender)        recipient = conv.receiver;
+        else if (conv.receiver === msg.sender) recipient = conv.sender;
+        else                                   recipient = conv.receiver || conv.sender || '';
+    }
+
+    // Dark green-tinted background with subtle scanlines.
+    c.fillStyle = 'rgba(0, 14, 4, 0.94)';
+    c.fillRect(0, 0, W, H);
+    c.fillStyle = 'rgba(0, 255, 65, 0.05)';
+    for (let y = 0; y < H; y += 3) c.fillRect(0, y, W, 1);
+
+    // Double border (outer bright, inner dim) for that CRT look.
+    c.strokeStyle = '#00ff41';
+    c.lineWidth = 3;
+    c.strokeRect(3, 3, W - 6, H - 6);
+    c.strokeStyle = '#0a6a22';
+    c.lineWidth = 1;
+    c.strokeRect(10, 10, W - 20, H - 20);
+
+    // Header row: message id + timestamp.
+    c.fillStyle = '#00ff41';
+    c.font = "bold 22px 'Courier New', monospace";
+    c.fillText('MSG #' + String(index + 1).padStart(3, '0'), 24, 44);
+
+    const ts = (msg.timestamp || '').slice(0, 16).replace('T', ' ');
+    if (ts) {
+        c.fillStyle = '#66ff99';
+        c.font = "13px 'Courier New', monospace";
+        const tsW = c.measureText(ts).width;
+        c.fillText(ts, W - 24 - tsW, 44);
+    }
+
+    // Divider under the header.
+    c.fillStyle = '#0a6a22';
+    c.fillRect(24, 54, W - 48, 1);
+
+    // FROM / TO / SUBJ rows.
+    function field(label, value, y, valColor) {
+        c.fillStyle = '#88ffaa';
+        c.font = "15px 'Courier New', monospace";
+        c.fillText(label, 24, y);
+        c.fillStyle = valColor || '#00ff41';
+        c.font = "15px 'Courier New', monospace";
+        const max = 40;
+        const truncated = (value || '').length > max
+            ? value.slice(0, max - 3) + '...'
+            : (value || '');
+        c.fillText(truncated, 110, y);
+    }
+    field('FROM:', msg.sender, 78);
+    field('TO:',   recipient,   98);
+    field('SUBJ:', msg.subject || '(no subject)', 118, '#ccffdd');
+
+    // Body preview, wrapped on word boundaries, max 3 lines (extra row above
+    // ate one line of body space).
+    const body = (msg.text || '').replace(/\s+/g, ' ').trim();
+    c.fillStyle = '#9affc4';
+    c.font = "13px 'Courier New', monospace";
+    const maxLineChars = 58;
+    const maxLines = 3;
+    let bodyY = 146;
+    const words = body.split(' ');
+    let line = '';
+    let lineCount = 0;
+    for (const w of words) {
+        if (lineCount >= maxLines) break;
+        const test = line ? line + ' ' + w : w;
+        if (test.length > maxLineChars) {
+            c.fillText(line, 24, bodyY);
+            bodyY += 18;
+            lineCount++;
+            line = w;
+        } else {
+            line = test;
+        }
+    }
+    if (line && lineCount < maxLines) c.fillText(line, 24, bodyY);
+
+    // Footer divider + classification badge.
+    c.fillStyle = '#0a6a22';
+    c.fillRect(24, H - 38, W - 48, 1);
+    c.fillStyle = '#66ff99';
+    c.font = "11px 'Courier New', monospace";
+    const label = msg.classification_label
+        ? '> CLASS: ' + String(msg.classification_label).toUpperCase()
+        : '> STATUS: ' + String(msg.classification_status || 'pending').toUpperCase();
+    c.fillText(label, 24, H - 18);
+
+    const tex = new THREE.CanvasTexture(cv);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.needsUpdate = true;
+    return tex;
+}
+
+function disposeRecursive(obj) {
+    obj.traverse(o => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) {
+            if (o.material.map) o.material.map.dispose();
+            o.material.dispose();
+        }
+    });
+}
+
+function clearEmailWindows() {
+    while (windowGroup.children.length) {
+        const ch = windowGroup.children[0];
+        windowGroup.remove(ch);
+        disposeRecursive(ch);
+    }
+    emailCards.length = 0;
+}
+
+function findNodePosition(emailAddr) {
+    const n = nodes.find(node => node.userData.email === emailAddr);
+    return n ? n.position.clone() : new THREE.Vector3(0, 0, 0);
+}
+
+// Spawn one floating preview window per recent email involving `emailAddr`.
+// Windows for a conversation sit along the edge between the two participants,
+// fanning out perpendicular to that edge so a busy thread occupies a shallow
+// 3D cloud rather than a flat stack. Each window is a billboarded plane
+// tethered to both endpoints by thin lines.
+function spawnEmailWindows(emailAddr) {
+    clearEmailWindows();
+
+    const msgs = [];
+    data.forEach(conv => {
+        if (conv.sender === emailAddr || conv.receiver === emailAddr) {
+            (conv.messages || []).forEach(m => msgs.push({ msg: m, conv }));
+        }
+    });
+    if (!msgs.length) return;
+
+    // Most-recent first, capped so we don't clutter the scene.
+    msgs.sort((a, b) => String(b.msg.timestamp || '').localeCompare(String(a.msg.timestamp || '')));
+    const top = msgs.slice(0, 8);
+
+    const center = findNodePosition(emailAddr);
+    const planeW = 3.0, planeH = 1.7;
+
+    // Group by counterparty so all messages of one conversation share an
+    // orientation basis along that conversation's edge in the graph.
+    const groups = new Map();
+    top.forEach(item => {
+        const other = item.conv.sender === emailAddr ? item.conv.receiver : item.conv.sender;
+        if (!groups.has(other)) groups.set(other, []);
+        groups.get(other).push(item);
+    });
+
+    // Flatten groups back to a linear placement list with per-group geometry.
+    const placements = [];
+    let groupIdx = 0;
+    groups.forEach((items, other) => {
+        const otherCenter = findNodePosition(other);
+        const along = otherCenter.clone().sub(center);
+        const edgeLen = along.length();
+        const dir = edgeLen > 1e-3 ? along.clone().normalize() : new THREE.Vector3(1, 0, 0);
+
+        // Build a stable perpendicular basis (right, up) on the edge so we
+        // can splay windows off the connecting line. Falls back to X when
+        // the edge happens to be parallel to world-up.
+        let right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0));
+        if (right.lengthSq() < 1e-4) right = new THREE.Vector3(1, 0, 0);
+        right.normalize();
+        const perpUp = new THREE.Vector3().crossVectors(right, dir).normalize();
+
+        // Rotate the offset plane per group so two conversations sharing
+        // similar edge directions still place windows in different volumes.
+        const phaseShift = groupIdx * 1.7;
+        // Scale the perpendicular radius with edge length so windows on long
+        // edges get more breathing room. Floor keeps short edges readable.
+        const baseR = Math.min(4.2, Math.max(2.6, edgeLen * 0.11));
+
+        items.forEach((item, idx) => {
+            const n = items.length;
+            // Spread along the middle 60% of the edge so multiple messages
+            // in one thread don't pile up at the midpoint.
+            const t = n === 1 ? 0.5 : 0.2 + (idx / (n - 1)) * 0.6;
+            const onLine = center.clone().lerp(otherCenter, t);
+
+            // Golden-angle phyllotaxis around the edge: every step lands in
+            // a fresh angular slot, and the radius pulses so consecutive
+            // windows aren't on the same perpendicular circle either.
+            const swirl = idx * 2.39996 + phaseShift; // ~137.5° per step
+            const radial = baseR * (0.85 + ((idx % 3) - 1) * 0.18);
+            const rOff = Math.cos(swirl) * radial;
+            const uOff = Math.sin(swirl) * radial + 0.4;
+            const offset = right.clone().multiplyScalar(rOff)
+                                  .add(perpUp.clone().multiplyScalar(uOff));
+            placements.push({ item, other, otherCenter, pos: onLine.add(offset) });
+        });
+        groupIdx++;
+    });
+
+    placements.forEach((p, i) => {
+        const { msg, conv } = p.item;
+        const other = p.other;
+        const otherCenter = p.otherCenter;
+        const { x, y, z } = p.pos;
+
+        const tex = makeEmailCardTexture(msg, i, conv);
+        const cardMat = new THREE.MeshBasicMaterial({
+            map: tex,
+            transparent: true,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+        });
+        const geo = new THREE.PlaneGeometry(planeW, planeH);
+        const card = new THREE.Mesh(geo, cardMat);
+        card.position.set(x, y, z);
+        card.scale.setScalar(0.01);
+        card.userData = {
+            type: 'card',
+            msg,
+            conv,
+            base: new THREE.Vector3(x, y, z),
+            phase: i * 0.83,
+            born: performance.now(),
+            hover: 0,
+        };
+
+        // Bright outline using EdgesGeometry — makes the window pop against
+        // the rain background and reinforces the terminal-frame look.
+        const edgeGeo = new THREE.EdgesGeometry(geo);
+        const edgeMat = new THREE.LineBasicMaterial({
+            color: 0x00ff41,
+            transparent: true,
+            opacity: 0.9,
+        });
+        const outline = new THREE.LineSegments(edgeGeo, edgeMat);
+        card.add(outline);
+
+        // Additive halo behind the card so the green bleeds into the rain.
+        const haloMat = new THREE.MeshBasicMaterial({
+            color: 0x00ff41,
+            transparent: true,
+            opacity: 0.16,
+            side: THREE.DoubleSide,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+        });
+        const halo = new THREE.Mesh(
+            new THREE.PlaneGeometry(planeW * 1.25, planeH * 1.4),
+            haloMat,
+        );
+        halo.position.z = -0.04;
+        card.add(halo);
+
+        // Tether lines from BOTH participants out to the window — one from the
+        // selected node, one from the other party in the conversation. Live in
+        // world space (not parented to the card) so they stay anchored as the
+        // card floats.
+        function addTether(anchor) {
+            const tetherGeo = new THREE.BufferGeometry().setFromPoints([
+                anchor.clone(),
+                new THREE.Vector3(x, y, z),
+            ]);
+            const tetherMat = new THREE.LineBasicMaterial({
+                color: 0x00ff41,
+                transparent: true,
+                opacity: 0.4,
+            });
+            const tether = new THREE.Line(tetherGeo, tetherMat);
+            tether.userData = { type: 'tether', card, anchor: anchor.clone() };
+            windowGroup.add(tether);
+        }
+        addTether(center);
+        if (other && other !== emailAddr) addTether(otherCenter);
+
+        windowGroup.add(card);
+        emailCards.push(card);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Per-frame animation hook: billboard each card to the camera, animate the
+// scale-in pop, gently float, and update tethers so they track the card.
+// ---------------------------------------------------------------------------
+setTick(() => {
+    const now = performance.now();
+    emailCards.forEach(card => {
+        card.lookAt(camera.position);
+        // The zoom-in animation owns scale + position for its hero card so the
+        // tick must stay out of its way (otherwise hover/float overwrites the
+        // zoom scale every frame).
+        if (card.userData.zooming) return;
+
+        const age = now - card.userData.born;
+        const grow = Math.min(1, age / 380);
+        const eased = 1 - Math.pow(1 - grow, 3);
+        const hoverBoost = card.userData.hover;
+        card.userData.hover += ((card === hoveredCard ? 1 : 0) - card.userData.hover) * 0.15;
+        const scale = eased * (1 + hoverBoost * 0.12);
+        card.scale.setScalar(scale);
+
+        const floatY = Math.sin(now * 0.001 + card.userData.phase) * 0.18;
+        card.position.copy(card.userData.base).add(new THREE.Vector3(0, floatY, 0));
+    });
+
+    // Tethers: redraw to follow their card's current (floating) position.
+    windowGroup.children.forEach(obj => {
+        if (obj.userData && obj.userData.type === 'tether') {
+            const pts = obj.geometry.attributes.position.array;
+            pts[3] = obj.userData.card.position.x;
+            pts[4] = obj.userData.card.position.y;
+            pts[5] = obj.userData.card.position.z;
+            obj.geometry.attributes.position.needsUpdate = true;
+        }
+    });
+});
 
 canvas.addEventListener('pointermove', e => {
     const rect = canvas.getBoundingClientRect();
     pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
-    const hits = raycaster.intersectObjects(nodes);
-    if (hits.length) {
-        hovered = hits[0].object;
-        tooltip.textContent = hovered.userData.email;
+
+    // Cards take hover priority — they're closer and more interactive.
+    const cardHits = emailCards.length ? raycaster.intersectObjects(emailCards, false) : [];
+    if (cardHits.length) {
+        hoveredCard = cardHits[0].object;
+        hoveredNode = null;
+        const m = hoveredCard.userData.msg;
+        tooltip.textContent = (m.subject || '(no subject)') + '  ·  click to open thread';
+        tooltip.style.left = (e.clientX + 12) + 'px';
+        tooltip.style.top  = (e.clientY + 12) + 'px';
+        tooltip.style.display = 'block';
+        canvas.style.cursor = 'pointer';
+        return;
+    }
+    hoveredCard = null;
+
+    const nodeHits = raycaster.intersectObjects(nodes);
+    if (nodeHits.length) {
+        hoveredNode = nodeHits[0].object;
+        tooltip.textContent = hoveredNode.userData.email;
         tooltip.style.left = (e.clientX + 12) + 'px';
         tooltip.style.top  = (e.clientY + 12) + 'px';
         tooltip.style.display = 'block';
         canvas.style.cursor = 'pointer';
     } else {
-        hovered = null;
+        hoveredNode = null;
         tooltip.style.display = 'none';
         canvas.style.cursor = 'default';
     }
 });
 
-canvas.addEventListener('click', () => {
-    if (!hovered) {
-        selectedEmail = null;
-        resetHighlights();
-        detailEl.innerHTML = '<div class="text-matrix-dark-green text-xs">// no node selected</div>';
+// ---------------------------------------------------------------------------
+// Cinematic zoom-in: when a card is clicked, dolly the camera at the card,
+// scale the target card up while fading the rest of the scene, then trigger
+// a CRT flash + scanline wipe before navigating to the chat thread. Runs on
+// requestAnimationFrame outside the main tick — when the animation owns the
+// camera we don't want orbit damping fighting it.
+// ---------------------------------------------------------------------------
+let zoomingIn = false;
+
+function zoomIntoCard(card) {
+    if (zoomingIn) return;
+    zoomingIn = true;
+    if (controls) controls.enabled = false;
+    tooltip.style.display = 'none';
+    canvas.style.cursor = 'progress';
+
+    const startPos    = camera.position.clone();
+    const startTarget = controls ? controls.target.clone() : new THREE.Vector3(0, 0, 0);
+
+    // End camera position: ride the start→card vector almost the whole way in,
+    // landing close enough that the card fills the frame but doesn't clip the
+    // near plane. The card billboards every frame, so its plane will be facing
+    // us when we arrive.
+    const cardPos = card.userData.base.clone();
+    const dir = cardPos.clone().sub(startPos);
+    const dist = dir.length();
+    const endDist = Math.max(2.0, dist * 0.08); // stop ~8% from the card
+    const endPos = cardPos.clone().add(dir.clone().normalize().multiplyScalar(-endDist));
+
+    // Cards that aren't the chosen one fade out. Keep refs so we can dim them
+    // smoothly in step with the camera move.
+    const otherCards = emailCards.filter(c => c !== card);
+    const tethers = windowGroup.children.filter(o => o.userData && o.userData.type === 'tether');
+    const startCardScale = card.scale.x || 1;
+    card.userData.zooming = true; // tells the per-frame tick to leave us alone
+
+    const duration = 780;
+    const flashAt  = 540;
+    const t0 = performance.now();
+    let flashed = false;
+
+    function step(now) {
+        const t = Math.min(1, (now - t0) / duration);
+        // easeInOutCubic for the camera dolly — slow start, accelerate, soft land
+        const e = t < 0.5
+            ? 4 * t * t * t
+            : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+        camera.position.lerpVectors(startPos, endPos, e);
+        if (controls) {
+            controls.target.lerpVectors(startTarget, cardPos, e);
+            controls.update();
+        } else {
+            camera.lookAt(cardPos);
+        }
+
+        // Pump up the hero card. The tick early-returns for cards flagged with
+        // `zooming`, so this is the only thing writing to the scale here.
+        card.scale.setScalar(startCardScale + e * 1.35);
+
+        // Fade the rest of the scene so the target card pops.
+        const fade = 1 - e;
+        otherCards.forEach(c => {
+            if (c.material) c.material.opacity = fade;
+            c.children.forEach(ch => {
+                if (ch.material) ch.material.opacity = (ch.material.userData?.baseOpacity ?? 0.4) * fade;
+            });
+        });
+        tethers.forEach(t => { if (t.material) t.material.opacity = 0.4 * fade; });
+        nodes.forEach(n => {
+            n.material.emissiveIntensity = (n.userData.baseIntensity || 0.7) * (0.5 + 0.5 * fade);
+        });
+        edges.forEach(ed => {
+            ed.material.opacity = (ed.userData.baseOpacity || 0.5) * fade;
+        });
+
+        // Late-stage CRT flash + scanline wipe right before navigation.
+        if (!flashed && now - t0 >= flashAt) {
+            flashed = true;
+            flashEl.classList.add('is-firing');
+            flashEl.style.transition = 'opacity 240ms ease-out';
+            flashEl.style.opacity = '1';
+        }
+
+        if (t < 1) {
+            requestAnimationFrame(step);
+        } else {
+            window.location.href = CHAT_URL + '?conv=' + card.userData.conv.id;
+        }
+    }
+    requestAnimationFrame(step);
+}
+
+// Track pointerdown position so we can tell a real click from an OrbitControls
+// drag. Without this, releasing after a camera rotation fires `click` on empty
+// space and wipes the current selection.
+let pointerDownAt = null;
+const CLICK_SLOP_PX = 5;
+canvas.addEventListener('pointerdown', e => {
+    pointerDownAt = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener('click', e => {
+    if (zoomingIn) return; // ignore clicks during the zoom-in animation
+    const moved = pointerDownAt
+        ? Math.hypot(e.clientX - pointerDownAt.x, e.clientY - pointerDownAt.y)
+        : 0;
+    pointerDownAt = null;
+    if (moved > CLICK_SLOP_PX) return; // drag, not a click — preserve selection
+
+    if (hoveredCard) {
+        // Card click → cinematic zoom into the card, then jump to the thread.
+        zoomIntoCard(hoveredCard);
         return;
     }
-    selectedEmail = hovered.userData.email;
-    renderDetail(selectedEmail);
+    if (hoveredNode) {
+        selectedEmail = hoveredNode.userData.email;
+        spawnEmailWindows(selectedEmail);
+        renderDetail(selectedEmail);
+        return;
+    }
+    // Empty-space click: deselect.
+    selectedEmail = null;
+    clearEmailWindows();
+    resetHighlights();
+    detailEl.innerHTML = '<div class="text-matrix-dark-green text-xs">// no node selected</div>';
 });
 
 function resetHighlights() {
@@ -187,6 +701,7 @@ function renderDetail(email) {
     const lines = [
         `<div class="text-matrix-green font-bold mb-2 matrix-glow">${escapeHTML(email)}</div>`,
         `<div class="text-xs text-matrix-light-green mb-3">${convs.length} thread(s) · ${totalMsgs} message(s)</div>`,
+        `<div class="text-xs text-matrix-dark-green mb-3">// floating windows show the most recent emails. click one to open the thread.</div>`,
     ];
     convs.forEach(c => {
         const other = c.sender === email ? c.receiver : c.sender;
