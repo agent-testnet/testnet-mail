@@ -1,0 +1,21 @@
+# Local-development overrides for `docker compose up` from the repo root.
+#
+# `docker compose` automatically merges this file on top of docker-compose.yml
+# when it sits next to it. Production is unaffected because scripts/deploy.sh
+# copies only docker-compose.yml to /opt/testnet-mail/, so this override file
+# is never present on the host the deploy actually runs from.
+#
+# To run the dashboard the same way prod does (behind nginx, /dashboard prefix,
+# Secure cookies), bypass this file with:
+#
+#     docker compose -f docker-compose.yml up -d
+
+services:
+  dashboard:
+    environment:
+      # Drops the /dashboard URL prefix and disables Secure cookie flags so the
+      # app is reachable directly at http://127.0.0.1:5000/login. The flag is
+      # named for the security trade-off (plain HTTP) so it cannot be mistaken
+      # for a benign "dev mode" toggle. dashboard/app.py also prints a loud
+      # WARNING to stderr at boot when this is set.
+      - DASHBOARD_ALLOW_PLAIN_HTTP=1

@@ -34,7 +34,33 @@ import time
 DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', '')
 DASHBOARD_SECRET_KEY = os.getenv('DASHBOARD_SECRET_KEY', '')
 DASHBOARD_SESSION_HOURS = int(os.getenv('DASHBOARD_SESSION_HOURS', '12'))
-SCRIPT_NAME = os.getenv('SCRIPT_NAME', '/dashboard')
+# DASHBOARD_ALLOW_PLAIN_HTTP=1 is a local-dev escape hatch that drops the
+# /dashboard URL prefix and disables Secure cookie flags so the app is reachable
+# at http://127.0.0.1:5000/login without nginx in front. It is intentionally
+# named for the security trade-off (plain HTTP) rather than the use case
+# ("dev"), so an operator skimming a .env file can see the cost.
+#
+# Production deploys never set this: the prod docker-compose.yml does not
+# reference it, the host-side deploy script copies only docker-compose.yml
+# (not the override file that turns it on), and any unintended setting trips
+# the loud WARNING below at boot.
+DASHBOARD_ALLOW_PLAIN_HTTP = os.getenv(
+    'DASHBOARD_ALLOW_PLAIN_HTTP', ''
+).lower() in ('1', 'true', 'yes')
+# Explicit SCRIPT_NAME wins over the local-dev default so an operator running
+# Flask behind a different prefix can still set it manually.
+SCRIPT_NAME = os.getenv(
+    'SCRIPT_NAME',
+    '' if DASHBOARD_ALLOW_PLAIN_HTTP else '/dashboard',
+)
+
+if DASHBOARD_ALLOW_PLAIN_HTTP:
+    print(
+        "WARNING: DASHBOARD_ALLOW_PLAIN_HTTP=1 is set. The dashboard is running "
+        "in local-dev mode (no /dashboard URL prefix, no Secure cookie flag). "
+        "This is unsafe on any reachable network. Unset for production.",
+        file=sys.stderr,
+    )
 
 if not DASHBOARD_PASSWORD:
     print(
@@ -55,7 +81,7 @@ if not DASHBOARD_SECRET_KEY:
 app = Flask(__name__)
 app.secret_key = DASHBOARD_SECRET_KEY
 app.config.update(
-    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SECURE=not DASHBOARD_ALLOW_PLAIN_HTTP,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     # Scope the session cookie to the public dashboard prefix so the browser
@@ -116,7 +142,7 @@ def _attach_csrf_cookie(response, token):
         token,
         max_age=3600,
         path=_csrf_cookie_path(),
-        secure=True,
+        secure=not DASHBOARD_ALLOW_PLAIN_HTTP,
         httponly=True,
         samesite='Strict',
     )

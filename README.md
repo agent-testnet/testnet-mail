@@ -55,6 +55,29 @@ sudo -E ./scripts/deploy.sh
 - `testnet-toolkit` at `/usr/local/bin/testnet-toolkit`
 - `curl`, `jq`, `envsubst` (from `gettext-base`)
 
+## Local development (no nginx)
+
+For iterating on the dashboard without standing up nginx + TLS, run compose from the repo root:
+
+```bash
+export DASHBOARD_PASSWORD="dev-password"
+export DASHBOARD_SECRET_KEY="$(openssl rand -hex 32)"
+docker compose up -d mailserver
+MAIL_DOMAIN=gmail.com bash scripts/seed-mail.sh           # within mailserver's startup grace window
+MAIL_DOMAIN=gmail.com bash scripts/seed-conversations.sh  # populates the dashboard demo accounts
+docker compose up -d dashboard
+open http://127.0.0.1:5000/login
+```
+
+`docker-compose.override.yml` (auto-merged by Compose when it sits next to `docker-compose.yml`) sets `DASHBOARD_ALLOW_PLAIN_HTTP=1` on the dashboard container, which:
+
+- strips the `/dashboard` URL prefix so the app is reachable at `/login`, `/chat`, `/visualize`, etc.;
+- drops the `Secure` cookie flag on the session and CSRF cookies so they survive plain HTTP.
+
+The dashboard prints a loud `WARNING` at startup whenever this flag is set, so it is hard to miss in container logs. The override is **never deployed**: `scripts/deploy.sh` copies only `docker-compose.yml` to the host, so production runs without the override file present and the flag is unset by default.
+
+To exercise the production path locally (Secure cookies, `/dashboard` prefix), bypass the override with `docker compose -f docker-compose.yml up -d` and put nginx in front yourself.
+
 ## Architecture
 
 ```
