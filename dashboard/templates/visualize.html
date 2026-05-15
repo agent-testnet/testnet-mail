@@ -197,11 +197,21 @@ const emailCards = [];
 // and uploaded as a THREE.CanvasTexture. The card is later mapped onto a
 // PlaneGeometry that billboards to the camera.
 // ---------------------------------------------------------------------------
-function makeEmailCardTexture(msg, index) {
+function makeEmailCardTexture(msg, index, conv) {
     const W = 512, H = 288;
     const cv = document.createElement('canvas');
     cv.width = W; cv.height = H;
     const c = cv.getContext('2d');
+
+    // Recipient isn't stored on the message itself — it's the other party in
+    // the 2-participant conversation. Fall back to the conv id label if for
+    // some reason the sender doesn't match either endpoint.
+    let recipient = '';
+    if (conv) {
+        if (conv.sender === msg.sender)        recipient = conv.receiver;
+        else if (conv.receiver === msg.sender) recipient = conv.sender;
+        else                                   recipient = conv.receiver || conv.sender || '';
+    }
 
     // Dark green-tinted background with subtle scanlines.
     c.fillStyle = 'rgba(0, 14, 4, 0.94)';
@@ -234,7 +244,7 @@ function makeEmailCardTexture(msg, index) {
     c.fillStyle = '#0a6a22';
     c.fillRect(24, 54, W - 48, 1);
 
-    // FROM / SUBJ rows.
+    // FROM / TO / SUBJ rows.
     function field(label, value, y, valColor) {
         c.fillStyle = '#88ffaa';
         c.font = "15px 'Courier New', monospace";
@@ -247,16 +257,18 @@ function makeEmailCardTexture(msg, index) {
             : (value || '');
         c.fillText(truncated, 110, y);
     }
-    field('FROM:', msg.sender, 84);
-    field('SUBJ:', msg.subject || '(no subject)', 112, '#ccffdd');
+    field('FROM:', msg.sender, 78);
+    field('TO:',   recipient,   98);
+    field('SUBJ:', msg.subject || '(no subject)', 118, '#ccffdd');
 
-    // Body preview, wrapped on word boundaries, max 4 lines.
+    // Body preview, wrapped on word boundaries, max 3 lines (extra row above
+    // ate one line of body space).
     const body = (msg.text || '').replace(/\s+/g, ' ').trim();
     c.fillStyle = '#9affc4';
     c.font = "13px 'Courier New', monospace";
     const maxLineChars = 58;
-    const maxLines = 4;
-    let bodyY = 140;
+    const maxLines = 3;
+    let bodyY = 146;
     const words = body.split(' ');
     let line = '';
     let lineCount = 0;
@@ -398,7 +410,7 @@ function spawnEmailWindows(emailAddr) {
         const otherCenter = p.otherCenter;
         const { x, y, z } = p.pos;
 
-        const tex = makeEmailCardTexture(msg, i);
+        const tex = makeEmailCardTexture(msg, i, conv);
         const cardMat = new THREE.MeshBasicMaterial({
             map: tex,
             transparent: true,
