@@ -34,7 +34,11 @@ import time
 DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', '')
 DASHBOARD_SECRET_KEY = os.getenv('DASHBOARD_SECRET_KEY', '')
 DASHBOARD_SESSION_HOURS = int(os.getenv('DASHBOARD_SESSION_HOURS', '12'))
-SCRIPT_NAME = os.getenv('SCRIPT_NAME', '/dashboard')
+# DASHBOARD_DEV=1 strips the /dashboard URL prefix and disables the
+# secure-cookie flags so the app is reachable over plain HTTP at
+# 127.0.0.1:5000/login without nginx in front. Production must leave it unset.
+DASHBOARD_DEV = os.getenv('DASHBOARD_DEV', '').lower() in ('1', 'true', 'yes')
+SCRIPT_NAME = '' if DASHBOARD_DEV else os.getenv('SCRIPT_NAME', '/dashboard')
 
 if not DASHBOARD_PASSWORD:
     print(
@@ -55,7 +59,7 @@ if not DASHBOARD_SECRET_KEY:
 app = Flask(__name__)
 app.secret_key = DASHBOARD_SECRET_KEY
 app.config.update(
-    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SECURE=not DASHBOARD_DEV,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     # Scope the session cookie to the public dashboard prefix so the browser
@@ -116,7 +120,7 @@ def _attach_csrf_cookie(response, token):
         token,
         max_age=3600,
         path=_csrf_cookie_path(),
-        secure=True,
+        secure=not DASHBOARD_DEV,
         httponly=True,
         samesite='Strict',
     )

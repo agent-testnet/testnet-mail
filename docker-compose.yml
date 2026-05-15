@@ -185,6 +185,10 @@ services:
       # survive redeploys.
       - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:?DASHBOARD_PASSWORD is required}
       - DASHBOARD_SECRET_KEY=${DASHBOARD_SECRET_KEY:?DASHBOARD_SECRET_KEY is required}
+      # DASHBOARD_DEV=1 makes the app reachable directly at 127.0.0.1:5000
+      # without nginx (no /dashboard prefix, plain-HTTP cookies). Leave unset
+      # in production.
+      - DASHBOARD_DEV=${DASHBOARD_DEV:-}
     volumes:
       - roundcube-db:/var/roundcube/db
     ports:
