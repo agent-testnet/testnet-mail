@@ -150,7 +150,7 @@ Gmail-style URL `/accounts/signup` is also rewritten to `/signup`.
 
 A small operator dashboard lives at `https://<mail-host>/dashboard/`. It scrapes IMAP for the four seeded test accounts (`alice`, `bob`, `charlie`, `diana`) and renders conversation views, message stats, and a 3D conversation network. Useful for sanity-checking that mail is flowing during testnet runs.
 
-It is **operator-only**, gated by a single shared password (`DASHBOARD_PASSWORD`, see env vars above). Login is a Flask session cookie signed with a persistent key generated and stored on the host at `/etc/testnet/dashboard-secret-key` -- the same persistence pattern as the Roundcube `des_key`, so existing operator sessions survive redeploys. Brute-force attempts hit the `dashboard_login` rate limit at nginx (10 r/min per IP, burst 5).
+It is **operator-only**, gated by a single shared password (`DASHBOARD_PASSWORD`, see env vars above). Login is a Flask session cookie signed with a persistent key generated and stored on the host at `/etc/testnet/dashboard-secret-key` -- the same persistence pattern as the Roundcube `des_key`, so existing operator sessions survive redeploys. Brute-force attempts hit the `dashboard` rate limit at nginx (2 r/s per IP, burst 30).
 
 The dashboard refuses to boot if `DASHBOARD_PASSWORD` is unset; a misconfigured deploy fails the worker loudly rather than silently serving the inboxes of test accounts to the world.
 
@@ -223,7 +223,7 @@ By default it checks the dashboard demo accounts `alice`, `bob`, `charlie`, and 
 - **No Docker socket exposure**: signup-api talks to a [Docker socket proxy](https://github.com/Tecnativa/docker-socket-proxy) that only allows `exec` operations. The raw socket is never mounted into application containers.
 - **Non-root signup-api**: runs as UID 10001 on Alpine base (no shell-heavy docker:cli image).
 - **CSRF protection**: signup form and dashboard login both use the double-submit cookie pattern (SameSite=Strict, HttpOnly, Secure).
-- **Rate limiting**: nginx rate-limits `/signup` (6/min), webmail (30/min), and `/dashboard/` (10/min) per IP, with burst allowance.
+- **Rate limiting**: nginx rate-limits `/signup` (30/min), webmail (5/s), and `/dashboard/` (2/s) per IP, with burst allowance. Sized for the testnet's shared NAT egress -- all agent VMs from one client share an IP, so per-IP limits apply across the fleet.
 - **Operator dashboard fail-closed**: the dashboard container refuses to start if `DASHBOARD_PASSWORD` is missing, so a misconfigured deploy never silently exposes mailbox content. Sessions signed with a persistent host-side key (`/etc/testnet/dashboard-secret-key`).
 - **Production WSGI**: dashboard runs under gunicorn with `debug` disabled -- no Werkzeug debugger console is reachable from the network.
 - **TLS hardened**: TLS 1.2+ only, modern cipher suite, no session tickets.
