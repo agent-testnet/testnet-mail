@@ -18,6 +18,18 @@ COPY static/ static/
 # Expose port
 EXPOSE 5000
 
+# Run as UID 33 (www-data on the Roundcube image) so that any files this
+# service touches inside the shared roundcube-db volume -- including the
+# SQLite -wal/-shm files that get created even on read-only SELECTs once
+# WAL mode is on -- are owned by the same UID Roundcube uses for its own
+# session/cache writes. If this container runs as root and wins the race
+# to lazy-create the SQLite file at startup, it ends up owning sqlite.db
+# root:root mode 0644 and locks Roundcube (www-data) out of session
+# writes; the visible symptom is "Invalid request! No data was saved." on
+# every webmail login. Numeric UID (no /etc/passwd entry needed) -- gunicorn
+# binds to 5000 which is >1024 so no privileged-port problem.
+USER 33:33
+
 # Hit /healthz (unauthenticated). The previous probe targeted / which now
 # 302-redirects to /login -- still a 200, but noisy and dependent on the
 # auth wiring.

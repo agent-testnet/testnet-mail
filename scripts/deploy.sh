@@ -315,6 +315,35 @@ fi
 echo "==> Seeding dashboard test accounts and conversations (idempotent)..."
 MAIL_DOMAIN="$MAIL_DOMAIN" bash "$REPO_DIR/scripts/seed-conversations.sh"
 
+# Ensure the shared roundcube-db volume is owned by UID 33 (Roundcube's
+# www-data) BEFORE the dependent services come up. Two reasons:
+#
+#  1. mail-classifier and dashboard both bind-mount roundcube-db at
+#     /var/roundcube/db. If either wins the race to lazy-create sqlite.db
+#     (and the -wal/-shm sidecar files that WAL mode creates on first open)
+#     while still running as root, those files end up root:root mode 0644
+#     and Roundcube -- running as www-data inside the official image --
+#     can read them but cannot UPDATE the session table. $_SESSION['temp']
+#     never persists between the login GET and POST, check_request() then
+#     fails the request-token guard in index.php, and every login attempt
+#     surfaces as "Invalid request! No data was saved." in the webmail UI.
+#
+#  2. On any host that already hit (1) before mail-classifier and dashboard
+#     were pinned to USER 33:33 (see their Dockerfiles), the volume still
+#     contains the wrong-owned files from that earlier run. A plain image
+#     rebuild does not re-chown the data volume, so a redeploy alone would
+#     not fix login. This one-shot chown repairs the state.
+#
+# Run as a throwaway alpine container so it works regardless of where the
+# host stores docker volumes (the bind-mount move to /opt/testnet-mail/docker
+# in aws-deploy.sh means the on-host path is not the docker default).
+# Compose-derived volume name: <project>_<volume>, project name = compose
+# directory basename ("testnet-mail" here).
+ROUNDCUBE_DB_VOLUME="$(basename "$INSTALL_DIR")_roundcube-db"
+echo "==> Ensuring $ROUNDCUBE_DB_VOLUME is owned by UID 33 (Roundcube www-data)..."
+docker run --rm -v "${ROUNDCUBE_DB_VOLUME}:/db" alpine:3 \
+  chown -R 33:33 /db
+
 echo "==> Starting Roundcube, signup-api, dashboard, and docker-proxy..."
 docker compose up -d
 

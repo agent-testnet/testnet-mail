@@ -295,6 +295,16 @@ docker exec mailserver doveadm auth test user@gmail.com password
 
 **Webmail "SMTP Error (554) ... Client host rejected: Access denied"**: The submission service (port 587) requires SASL auth, and Roundcube only authenticates if it can decrypt the IMAP password from the user's session. If the session was created before a `roundcube` container recreate that regenerated `des_key`, decryption silently returns empty and SMTP AUTH is skipped. The deploy script pins `des_key` to `/etc/testnet/roundcube-des-key` and passes it to the container via `ROUNDCUBEMAIL_DES_KEY`, so sessions survive normal recreates. If a user still sees this error (e.g. immediately after the very first deploy that introduced the pin, or after the file was deleted), have them log out and log back in.
 
+**Webmail login fails with "Invalid request! No data was saved."**: Roundcube's `check_request()` request-token guard is failing because `$_SESSION['temp']` never persisted between the login GET and POST. In this stack the cause is almost always an ownership mismatch on the shared `roundcube-db` volume (`/var/roundcube/db/sqlite.db` and its `-wal`/`-shm` sidecars): if either `mail-classifier` or `dashboard` ran as root and won the race to lazy-create those files, they end up `root:root 0644` and Roundcube (running as `www-data`) can read but cannot `UPDATE session`. The fix is to chown the volume to UID 33 and restart the dependent services:
+
+```bash
+docker exec roundcube ls -la /var/roundcube/db   # expect www-data:www-data
+docker run --rm -v testnet-mail_roundcube-db:/db alpine chown -R 33:33 /db
+docker compose -f /opt/testnet-mail/docker-compose.yml restart roundcube
+```
+
+`scripts/deploy.sh` now performs this chown automatically before bringing up dependent services, and the `mail-classifier` + `dashboard` Dockerfiles pin `USER 33:33` so the race cannot reappear -- but the chown is still needed once on any host that was deployed before those changes landed.
+
 **Sent mail shows up in Sent folder but never arrives in any local Inbox** (with `mail.log` warning `do not list domain <X> in BOTH mydestination and virtual_mailbox_domains` and `status=bounced (unknown user: ...)`): `OVERRIDE_HOSTNAME` is set to the bare mail domain instead of a sub-domain. Postfix copies `$myhostname` into `mydestination`, which then collides with `virtual_mailbox_domains` and steals delivery away from Dovecot LMTP into the `local` transport (which only knows Unix users). Fix: set `OVERRIDE_HOSTNAME=mail.<domain>` in `mailserver.env` and recreate the `mailserver` container. `scripts/deploy.sh` does this automatically; if you edit by hand, keep the `mail.` prefix.
 
 ## Logs
