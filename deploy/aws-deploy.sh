@@ -120,12 +120,28 @@ tag_spec() {
 
 # ── SSH helpers ───────────────────────────────────────────────────────────────
 
+# Common SSH options applied to every interactive ssh/scp/rsync we run against
+# the EC2 host. The keepalive options are critical: long-running steps like
+# `docker compose build` on a t3a.micro can leave the host effectively
+# unresponsive for several minutes while it pages through swap, and without
+# keepalives intermediate NAT/Wi-Fi will silently drop the TCP connection
+# behind our back. ServerAliveInterval=30 + ServerAliveCountMax=20 means we
+# tolerate up to ~10 minutes of remote silence before giving up, while still
+# noticing a genuinely dead host eventually.
+SSH_OPTS=(
+    -o StrictHostKeyChecking=accept-new
+    -o BatchMode=yes
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=20
+    -o TCPKeepAlive=yes
+)
+
 wait_for_ssh() {
     local ip="$1" key="$2" max_attempts=40 attempt=0
     ssh-keygen -R "$ip" 2>/dev/null || true
     info "Waiting for SSH on ${ip}..."
     while [ $attempt -lt $max_attempts ]; do
-        if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes \
+        if ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 \
             -i "$key" "ubuntu@${ip}" "echo ready" >/dev/null 2>&1; then
             return 0
         fi
@@ -137,12 +153,12 @@ wait_for_ssh() {
 
 remote_exec() {
     local ip="$1" key="$2"; shift 2
-    ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -i "$key" "ubuntu@${ip}" "$@"
+    ssh "${SSH_OPTS[@]}" -i "$key" "ubuntu@${ip}" "$@"
 }
 
 remote_copy() {
     local key="$1" src="$2" dest="$3"
-    scp -o StrictHostKeyChecking=accept-new -o BatchMode=yes -i "$key" "$src" "$dest"
+    scp "${SSH_OPTS[@]}" -i "$key" "$src" "$dest"
 }
 
 # ── EIP helpers ───────────────────────────────────────────────────────────────
@@ -277,11 +293,98 @@ provision_host() {
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-echo "  [1/4] Updating packages..."
+echo "  [1/6] Configuring swap..."
+# t3a.micro has 1 GiB RAM and zero swap by default. Without swap, multiple
+# concurrent BuildKit jobs (Go compile + pip install + apt-get install gcc)
+# during `docker compose build` thrash the host into effectively-unresponsive
+# territory: the build doesn't OOM-kill, it just stops making forward progress
+# while dockerd's gRPC healthchecks time out. A 2 GiB swapfile gives enough
+# headroom for those builds (and any future memory spikes from dashboard /
+# mailserver scrapes) to complete cleanly. Idempotent.
+if [ ! -f /swapfile ]; then
+    echo "    Creating 2 GiB swapfile..."
+    fallocate -l 2G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null
+    swapon /swapfile
+    grep -q '^/swapfile ' /etc/fstab || \
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    # Bias the kernel towards keeping anonymous pages in RAM and reclaiming
+    # page cache first, which on a memory-tight VM keeps interactive work
+    # responsive while still allowing builds to fall back to swap.
+    sysctl -wq vm.swappiness=10
+    grep -q '^vm.swappiness' /etc/sysctl.conf || \
+        echo 'vm.swappiness=10' >> /etc/sysctl.conf
+fi
+
+echo "  [2/6] Configuring Docker storage on data volume..."
+# Bind-mount /var/lib/docker and /var/lib/containerd onto subdirectories of
+# the persistent 10 GiB EBS data volume mounted at /opt/testnet-mail. Three
+# reasons:
+#   - The 8 GiB Ubuntu root volume can't hold docker-mailserver (1.2 G) +
+#     Roundcube (994 M) + Python images + buildkit cache + apt + Ubuntu base.
+#     `pip install` was failing with [Errno 28] No space left on device, and
+#     once the root fills, even `apt-get update` aborts.
+#   - Docker named volumes (mail-data, mail-state, mail-logs, roundcube-db)
+#     contain mailbox state and the classifier DB. Putting them on the data
+#     volume means they survive instance teardowns -- which is the entire
+#     point of provisioning a separate persistent EBS volume.
+#   - Docker 29 stores image content via containerd, so both /var/lib/docker
+#     (containers, named volumes, build cache, networks) and /var/lib/containerd
+#     (image layers/snapshots) need to live on the data volume.
+#
+# Bind mounts (rather than editing daemon.json + containerd config) keep
+# Docker's view of the world unchanged -- `docker info` still reports
+# /var/lib/docker -- while the bytes actually land on the data volume. This
+# step runs BEFORE apt update so a previously-deployed instance whose root
+# has filled up with image layers can free space here and then update apt.
+# Idempotent: bails if the bind mounts are already in place.
+DOCKER_DATA_ROOT=/opt/testnet-mail/docker
+CONTAINERD_ROOT=/opt/testnet-mail/containerd
+mkdir -p "$DOCKER_DATA_ROOT" "$CONTAINERD_ROOT" /var/lib/docker /var/lib/containerd
+
+bind_mount_storage() {
+    local src="$1" dst="$2"
+    if findmnt -n "$dst" >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "    Bind-mounting $src -> $dst"
+    # Stop any service that might be holding files in $dst before we wipe it.
+    systemctl stop docker.socket 2>/dev/null || true
+    systemctl stop docker 2>/dev/null || true
+    systemctl stop containerd 2>/dev/null || true
+    # Free the root volume by removing whatever was previously stored at the
+    # default location. Image layers re-pull cheaply on the next deploy, and
+    # any in-place containers/volumes are about to be re-created anyway.
+    find "$dst" -mindepth 1 -delete 2>/dev/null || true
+    mount --bind "$src" "$dst"
+    # nofail: if the data volume ever fails to mount, don't block the host
+    # from booting -- we'd rather have a degraded host we can SSH into than
+    # an emergency-shell instance.
+    # x-systemd.requires-mounts-for: order this bind mount AFTER the data
+    # volume's own mount, since systemd otherwise resolves bind mounts
+    # without dependency on their source path.
+    grep -qF "$src $dst none bind" /etc/fstab \
+        || echo "$src $dst none bind,nofail,x-systemd.requires-mounts-for=/opt/testnet-mail 0 0" >> /etc/fstab
+}
+
+bind_mount_storage "$DOCKER_DATA_ROOT" /var/lib/docker
+bind_mount_storage "$CONTAINERD_ROOT" /var/lib/containerd
+
+# Restart Docker if it was previously installed and we just stopped it. On a
+# fresh instance Docker isn't installed yet, so skip; the apt install in step
+# [4/6] will start it for the first time and it'll use the bind-mounted dirs.
+if command -v dockerd &>/dev/null; then
+    systemctl daemon-reload
+    systemctl start containerd
+    systemctl start docker
+fi
+
+echo "  [3/6] Updating packages..."
 apt-get update -qq
 apt-get upgrade -y -qq
 
-echo "  [2/4] Installing Docker..."
+echo "  [4/6] Installing Docker..."
 if ! command -v docker &>/dev/null; then
     apt-get install -y -qq ca-certificates curl gnupg
     install -m 0755 -d /etc/apt/keyrings
@@ -293,7 +396,7 @@ if ! command -v docker &>/dev/null; then
     systemctl enable --now docker
 fi
 
-echo "  [3/4] Installing nginx..."
+echo "  [5/6] Installing nginx..."
 if ! command -v nginx &>/dev/null; then
     apt-get install -y -qq nginx
     systemctl enable nginx
@@ -301,17 +404,38 @@ fi
 
 apt-get install -y -qq gettext-base jq
 
-echo "  [4/4] Installing testnet-toolkit..."
+echo "  [6/6] Installing testnet-toolkit..."
 if [ ! -f /usr/local/bin/testnet-toolkit ]; then
-    TOOLKIT_URL=$(curl -fsSL https://api.github.com/repos/agent-testnet/agent-testnet/releases/latest \
-        | jq -r '.assets[] | select(.name | test("toolkit.*linux.*amd64")) | .browser_download_url' \
-        | head -1)
+    # Prefer a published release if available. The GitHub API returns 404 when
+    # the upstream repo has no releases yet, so the curl call must be allowed
+    # to fail without aborting the surrounding `set -euo pipefail` heredoc --
+    # hence the `if` wrapper rather than a bare pipeline.
+    TOOLKIT_URL=""
+    if release_json=$(curl -fsSL https://api.github.com/repos/agent-testnet/agent-testnet/releases/latest 2>/dev/null); then
+        TOOLKIT_URL=$(echo "$release_json" \
+            | jq -r '.assets[]? | select(.name | test("toolkit.*linux.*amd64")) | .browser_download_url' \
+            | head -1)
+    fi
     if [ -n "$TOOLKIT_URL" ] && [ "$TOOLKIT_URL" != "null" ]; then
         curl -fsSL "$TOOLKIT_URL" -o /usr/local/bin/testnet-toolkit
         chmod +x /usr/local/bin/testnet-toolkit
         echo "    testnet-toolkit installed from release"
     else
-        echo "    WARNING: Could not find testnet-toolkit release. Install manually."
+        # No release published. Build from source using the upstream
+        # Dockerfile.build, which produces a static /testnet-toolkit binary in
+        # a `scratch` image. Docker was installed in step [4/6]; we use a
+        # remote git build context so we don't need git on the host.
+        echo "    No published release found; building from source via Docker..."
+        docker build --network=host \
+            -f Dockerfile.build \
+            -t agent-testnet-toolkit-builder:latest \
+            https://github.com/agent-testnet/agent-testnet.git#main
+        cid=$(docker create --entrypoint="" agent-testnet-toolkit-builder:latest /bin/true)
+        docker cp "$cid:/testnet-toolkit" /usr/local/bin/testnet-toolkit
+        docker rm "$cid" >/dev/null
+        docker rmi agent-testnet-toolkit-builder:latest >/dev/null || true
+        chmod +x /usr/local/bin/testnet-toolkit
+        echo "    testnet-toolkit built from source"
     fi
 fi
 
@@ -330,7 +454,7 @@ rsync_and_deploy() {
         --exclude 'deploy/.aws-*' \
         --exclude 'config/' \
         --exclude 'backups/' \
-        -e "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -i $key" \
+        -e "ssh ${SSH_OPTS[*]} -i $key" \
         "$PROJECT_DIR/" "ubuntu@${ip}:/tmp/testnet-mail/"
 
     info "Running deploy.sh on instance..."
@@ -461,7 +585,7 @@ do_deploy() {
         --instance-type "$INSTANCE_TYPE" \
         --key-name "$KEY_NAME" \
         --security-group-ids "$sg_id" \
-        --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":8,"VolumeType":"gp3"}}]' \
+        --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":20,"VolumeType":"gp3"}}]' \
         --tag-specifications "$(tag_spec instance mail)" \
         "${placement_args[@]+"${placement_args[@]}"}" \
         --query 'Instances[0].InstanceId' \
@@ -643,7 +767,7 @@ do_ssh() {
     [ -z "$ip" ] && err "No Elastic IP in state -- is the service deployed?"
     if [ $# -eq 0 ]; then
         info "Connecting to $ip..."
-        exec ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -i "$KEY_FILE" "ubuntu@${ip}"
+        exec ssh "${SSH_OPTS[@]}" -i "$KEY_FILE" "ubuntu@${ip}"
     else
         [ "${1:-}" = "--" ] && shift
         remote_exec "$ip" "$KEY_FILE" "$@"
@@ -663,6 +787,12 @@ do_redeploy() {
     instance_id=$(load_state "instance_${ROLE}")
     ip=$(load_state eip_public_ip)
     [ -z "$instance_id" ] || [ -z "$ip" ] && err "No running deployment found. Run 'deploy' first."
+    # provision_host is idempotent (each step skips if already installed) and
+    # cheap to re-run, so we always re-provision on redeploy. This lets fixes
+    # to provisioning logic propagate without a full teardown, and recovers
+    # cleanly from a half-provisioned instance (e.g. when the toolkit install
+    # step previously aborted before completing).
+    provision_host "$ip" "$KEY_FILE"
     rsync_and_deploy "$ip" "$KEY_FILE"
     info "Redeploy complete"
 }

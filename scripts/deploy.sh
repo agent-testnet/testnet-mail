@@ -256,7 +256,22 @@ chmod 600 "$CRED_FILE"
 echo "==> Starting Docker Compose..."
 cd "$INSTALL_DIR"
 docker compose pull --quiet --ignore-buildable
-docker compose build --quiet
+
+# Build buildable services one at a time. `docker compose build` (and its
+# underlying BuildKit) parallelizes by default, which on a t3a.micro (1 GiB
+# RAM) means three memory-hungry jobs -- Go compile, `pip install`, and
+# `apt-get install gcc` -- run concurrently and thrash the host until the
+# local SSH session times out. Building sequentially adds a couple of
+# minutes vs. parallel-on-a-bigger-host but is reliable on small VMs and
+# does not hide failures behind a multiplexed BuildKit progress stream.
+# The buildable list is derived from the compose file (services with a
+# `build:` key) so it stays in sync if a service is added or removed.
+buildable_services=$(docker compose config --format json \
+  | jq -r '.services | to_entries[] | select(.value.build != null) | .key')
+for svc in $buildable_services; do
+  echo "    Building $svc..."
+  docker compose build --quiet "$svc"
+done
 
 echo "==> Starting mailserver (accounts required before it becomes healthy)..."
 docker compose up -d mailserver
