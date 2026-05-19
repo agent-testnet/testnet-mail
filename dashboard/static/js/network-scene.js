@@ -32,6 +32,39 @@ export function buildNetworkScene(canvas, conversations, options = {}) {
     const users = Array.from(userSet).sort();
     const userIdx = new Map(users.map((u, i) => [u, i]));
 
+    // Per-user aggregate severity: sum of total_severity across every
+    // conversation a user participates in. Drives node size + color below
+    // so the worst-affected mailboxes visually bulge and shift toward red.
+    const userSeverity = new Map(users.map(u => [u, 0]));
+    conversations.forEach(c => {
+        const sev = Number(c.total_severity) || 0;
+        if (!sev) return;
+        if (userSeverity.has(c.sender))   userSeverity.set(c.sender,   userSeverity.get(c.sender)   + sev);
+        if (userSeverity.has(c.receiver)) userSeverity.set(c.receiver, userSeverity.get(c.receiver) + sev);
+    });
+    const maxUserSeverity = Math.max(0, ...userSeverity.values());
+
+    // Smoothly map an aggregate severity into a [0,1] intensity used by
+    // both the radius and the color lerp. log1p keeps a single outlier
+    // from dwarfing everyone else, and the guard avoids divide-by-zero
+    // when no conversation has been scored yet (all-pending dataset).
+    function severityIntensity(agg) {
+        if (!agg || maxUserSeverity <= 0) return 0;
+        return Math.min(1, Math.log1p(agg) / Math.log1p(maxUserSeverity));
+    }
+
+    // Green -> amber -> red along intensity 0 -> 0.5 -> 1, returned as a
+    // THREE.Color via a hex int suitable for Material.color/emissive.
+    function severityColor(intensity) {
+        const green = new THREE.Color(0x00ff41);
+        const amber = new THREE.Color(0xffaa00);
+        const red   = new THREE.Color(0xff3030);
+        if (intensity <= 0.5) {
+            return green.clone().lerp(amber, intensity / 0.5);
+        }
+        return amber.clone().lerp(red, (intensity - 0.5) / 0.5);
+    }
+
     const R = Math.max(6, users.length * 1.2);
     const positions = users.map((_, i) => {
         const n = users.length;
@@ -56,7 +89,10 @@ export function buildNetworkScene(canvas, conversations, options = {}) {
         0.1,
         500
     );
-    camera.position.set(0, 4, R * 3.2);
+    // Initial dolly distance: slightly tighter than the previous R*3.2
+    // so the cluster fills more of the viewport on first paint, without
+    // pushing inside the controls.minDistance floor below (R*1.4).
+    camera.position.set(0, 4, R * 2.6);
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(window.devicePixelRatio);
@@ -82,24 +118,48 @@ export function buildNetworkScene(canvas, conversations, options = {}) {
     fillLight.position.set(-R, -R * 0.5, R);
     scene.add(fillLight);
 
-    const nodeGeo = new THREE.SphereGeometry(0.5, 32, 32);
+    // Each node gets its own geometry now -- radius scales per user with
+    // aggregate severity, so the shared single-geo trick doesn't apply.
+    // Baseline 0.5 is the original size; multiplier caps near 1.6x so the
+    // worst offender bulges visibly without overwhelming the layout.
+    const BASE_RADIUS = 0.5;
+    const MAX_RADIUS_MULT = 1.6;
+
     const nodes = users.map((email, i) => {
+        const agg = userSeverity.get(email) || 0;
+        const intensity = severityIntensity(agg);
+        const radius = BASE_RADIUS * (1 + (MAX_RADIUS_MULT - 1) * intensity);
+        const color = severityColor(intensity);
+
         const mat = new THREE.MeshStandardMaterial({
-            color: 0x00ff41,
-            emissive: 0x00ff41,
+            color: color.getHex(),
+            emissive: color.getHex(),
             emissiveIntensity: 0.7,
             roughness: 0.35,
             metalness: 0.15,
         });
-        const mesh = new THREE.Mesh(nodeGeo, mat);
+        const mesh = new THREE.Mesh(
+            new THREE.SphereGeometry(radius, 32, 32),
+            mat,
+        );
         mesh.position.copy(positions[i]);
-        mesh.userData = { email, type: 'node', baseIntensity: 0.7 };
+        mesh.userData = {
+            email,
+            type: 'node',
+            baseIntensity: 0.7,
+            severity: agg,
+            severityIntensity: intensity,
+        };
         scene.add(mesh);
 
         if (halos) {
             const halo = new THREE.Mesh(
-                new THREE.SphereGeometry(0.9, 24, 24),
-                new THREE.MeshBasicMaterial({ color: 0x00ff41, transparent: true, opacity: 0.12 })
+                new THREE.SphereGeometry(radius * 1.8, 24, 24),
+                new THREE.MeshBasicMaterial({
+                    color: color.getHex(),
+                    transparent: true,
+                    opacity: 0.12 + intensity * 0.18,
+                }),
             );
             halo.position.copy(positions[i]);
             scene.add(halo);
@@ -107,7 +167,7 @@ export function buildNetworkScene(canvas, conversations, options = {}) {
 
         if (labels) {
             const label = makeLabel(email.split('@')[0]);
-            label.position.copy(positions[i]).add(new THREE.Vector3(0, 1.1, 0));
+            label.position.copy(positions[i]).add(new THREE.Vector3(0, radius + 0.6, 0));
             scene.add(label);
         }
 

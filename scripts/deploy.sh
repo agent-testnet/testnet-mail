@@ -301,11 +301,11 @@ if [ "$status" != "healthy" ]; then
   exit 1
 fi
 
-# Seed the four dashboard test accounts (alice/bob/charlie/diana) plus a
-# handful of sample conversations between them. The dashboard's IMAP scrape
-# (dashboard/app.py:TEST_ACCOUNTS) hardcodes these accounts; without them
-# the dashboard renders an empty page after login and operators conclude
-# "nothing happened".
+# Seed the four dashboard demo accounts (alice/bob/charlie/diana) plus a
+# handful of sample conversations between them. The dashboard also scrapes
+# additional operator-configured mailboxes (see dashboard/app.py:TEST_ACCOUNTS)
+# that are not created here. Without the four demo accounts seeded, much of
+# the dashboard demo content is empty after login.
 #
 # The seed script is idempotent (each send is gated on doveadm-search of
 # the recipient's mailbox for the (from, subject) pair), so we run it on

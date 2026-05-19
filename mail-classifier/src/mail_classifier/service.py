@@ -41,17 +41,28 @@ class MailClassifierService:
         processed = 0
         for email_row in self.repository.pending_emails(self.settings.batch_size):
             try:
+                # Give the LLM the prior thread between these two parties so
+                # it can identify `pwned` replies to earlier `malicious`
+                # messages. Empty list on first contact, which is fine —
+                # build_prompt simply omits the context block.
+                prior_messages = self.repository.prior_thread(
+                    sender=email_row.sender,
+                    recipient=email_row.recipient,
+                    exclude_id=email_row.id,
+                )
                 result = self.classifier_client.classify_email(
                     sender=email_row.sender,
                     recipient=email_row.recipient,
                     subject=email_row.subject,
                     body_text=email_row.body_text,
+                    prior_messages=prior_messages,
                 )
                 self.repository.save_classification(
                     email_row.id,
                     result.label,
                     result.reason,
                     self.classifier_client.model_name,
+                    result.severity,
                 )
                 processed += 1
             except Exception as exc:

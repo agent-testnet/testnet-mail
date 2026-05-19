@@ -35,10 +35,17 @@ class FakeSyncer:
 class FakeClassifierClient:
     model_name = "fake-classifier"
 
-    def classify_email(self, **_: str) -> ClassificationResult:
+    def __init__(self) -> None:
+        # Record the last set of kwargs the service handed us so tests can
+        # assert prior-thread context was wired through correctly.
+        self.last_call: dict = {}
+
+    def classify_email(self, **kwargs) -> ClassificationResult:
+        self.last_call = kwargs
         return ClassificationResult(
             label="malicious",
             reason="Urgent credential-style request with suspicious language.",
+            severity=85,
         )
 
 
@@ -121,6 +128,82 @@ def test_imap_sync_skips_auth_failures_and_continues(monkeypatch, tmp_path):
     stored = repository.fetch_email(1)
     assert stored is not None
     assert stored["account_email"] == "alice@gmail.com"
+
+
+def test_service_passes_prior_thread_context_to_classifier(tmp_path):
+    """Once a prior message between the same two parties is classified, the
+    next pending message for that pair must be classified WITH that prior
+    row passed in as `prior_messages`. This is what enables `pwned` to be
+    detected at all."""
+    repository = ClassificationRepository(str(tmp_path / "classifier.db"))
+
+    repository.insert_email(
+        EmailRecord(
+            account_email="alice@gmail.com",
+            mailbox="INBOX",
+            uid="m1",
+            message_id="<m1@example.test>",
+            sender="mallory@evil.example",
+            recipient="alice@gmail.com",
+            subject="Reset your wallet",
+            body_text="Send credentials.",
+            received_at="2026-05-14T12:00:00+00:00",
+        )
+    )
+    first_pending = repository.pending_emails(limit=10)[0]
+    repository.save_classification(
+        first_pending.id, "malicious", "Phishing.", "seed", severity=80
+    )
+
+    repository.insert_email(
+        EmailRecord(
+            account_email="alice@gmail.com",
+            mailbox="INBOX",
+            uid="m2",
+            message_id="<m2@example.test>",
+            sender="mallory@evil.example",
+            recipient="alice@gmail.com",
+            subject="Re: Reset your wallet",
+            body_text="One more thing...",
+            received_at="2026-05-14T13:00:00+00:00",
+        )
+    )
+
+    fake_client = FakeClassifierClient()
+    settings = Settings(
+        db_path=str(tmp_path / "classifier.db"),
+        heartbeat_path=str(tmp_path / "heartbeat"),
+        mailserver_host="mailserver",
+        mailserver_port=143,
+        mailbox="INBOX",
+        poll_interval_seconds=1,
+        batch_size=10,
+        provider=PROVIDER_GEMINI,
+        api_key="test-key",
+        model_name="gemini-2.5-flash-lite",
+        accounts=(MailAccount("alice@gmail.com", "alice-password"),),
+    )
+
+    # Use a no-op syncer so we classify exactly the row we pre-seeded.
+    class NoopSyncer:
+        def sync_accounts(self, accounts):
+            return type("SyncResult", (), {"inserted": 0, "skipped": 0})()
+
+    service = MailClassifierService(
+        settings=settings,
+        repository=repository,
+        syncer=NoopSyncer(),
+        classifier_client=fake_client,
+    )
+    service.run_once()
+
+    prior = fake_client.last_call.get("prior_messages")
+    assert prior is not None and len(prior) == 1
+    assert prior[0].label == "malicious"
+    assert prior[0].sender == "mallory@evil.example"
+    assert prior[0].subject == "Reset your wallet"
+
+
 SAMPLE_MESSAGE = (
     b"From: Bob <bob@gmail.com>\r\n"
     b"To: Alice <alice@gmail.com>\r\n"

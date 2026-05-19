@@ -4,33 +4,8 @@
 
 {% block extra_css %}
 <style>
-    .classification-badge {
-        display: inline-flex;
-        align-items: center;
-        margin-left: 8px;
-        padding: 2px 8px;
-        border-radius: 999px;
-        font-size: 10px;
-        font-weight: bold;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        border: 1px solid #00cc00;
-    }
-    .classification-badge.benign {
-        background: rgba(0, 120, 0, 0.25);
-        color: #6dff8d;
-        border-color: #39ff7a;
-    }
-    .classification-badge.malicious {
-        background: rgba(255, 40, 40, 0.14);
-        color: #ff6b6b;
-        border-color: #ff4d4d;
-    }
-    .classification-badge.pending {
-        background: rgba(90, 110, 90, 0.18);
-        color: #9bd39b;
-        border-color: #4b7a4b;
-    }
+    /* .classification-badge styling lives in base.html so dashboard.html and
+       chat.html stay in sync. */
     #intro-overlay {
         position: fixed;
         inset: 0;
@@ -99,12 +74,40 @@
 <div class="container mx-auto px-4 py-8">
     <!-- Header -->
     <div class="matrix-header mb-6 p-6 rounded-lg">
-        <h1 class="text-4xl font-bold matrix-glow mb-2">&gt; MAIL_SERVER_DASHBOARD</h1>
-        <p class="text-matrix-light-green text-sm">Real-time conversation analysis · System monitoring</p>
-        <div class="mt-4 text-xs text-matrix-dark-green">
-            [SYSTEM ONLINE] · [DATA STREAM ACTIVE] · [CONVERSATIONS MONITORED: {{ stats.total_conversations }}]
+        <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;">
+            <div style="flex: 1;">
+                <h1 class="text-4xl font-bold matrix-glow mb-2">&gt; MAIL_SERVER_DASHBOARD</h1>
+                <p class="text-matrix-light-green text-sm">Real-time conversation analysis · System monitoring</p>
+                <div class="mt-4 text-xs text-matrix-dark-green">
+                    [SYSTEM ONLINE] · [DATA STREAM ACTIVE] · [CONVERSATIONS MONITORED: {{ stats.total_conversations }}]
+                </div>
+            </div>
+            <form method="POST" action="{{ url_for('reclassify') }}"
+                  onsubmit="return confirm('Reclassify ALL messages? The worker reprocesses them on its next poll (~15s). Existing labels will briefly show as pending until each row is re-evaluated.');"
+                  style="margin: 0;">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <button type="submit"
+                        class="matrix-hover"
+                        title="Reset every classifier_emails row to pending so the worker reprocesses them"
+                        style="background: rgba(0, 30, 0, 0.6); border: 1px solid #00ff41; color: #00ff41;
+                               padding: 10px 16px; border-radius: 4px; cursor: pointer;
+                               font-family: 'Courier New', monospace; font-size: 13px; letter-spacing: 1px;">
+                    &gt; RECLASSIFY ALL
+                </button>
+            </form>
         </div>
     </div>
+
+    {% if flashes %}
+    <div class="mb-4">
+        {% for category, msg in flashes %}
+        {% set tone = '#39ff7a' if category == 'success' else '#ff6b6b' %}
+        <div class="matrix-card rounded p-3 mb-2" style="border-color: {{ tone }}; color: {{ tone }}; font-family: 'Courier New', monospace; font-size: 13px;">
+            &gt; {{ msg }}
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
 
     <!-- 3D Tracker CTA -->
     <a href="{{ url_for('visualize') }}" class="block matrix-card rounded-lg p-5 mb-8 matrix-hover"
@@ -146,6 +149,132 @@
         </div>
     </div>
 
+    <!-- Classification Breakdown -->
+    {% set lc = stats.label_counts or {} %}
+    {% set total_classified = (lc.benign or 0) + (lc.malicious or 0) + (lc.pwned or 0) + (lc.pending or 0) %}
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+        {% for entry in [
+            ('benign',    lc.benign    or 0, 'Routine traffic'),
+            ('malicious', lc.malicious or 0, 'Phish / scam / fraud'),
+            ('pwned',     lc.pwned     or 0, 'Victim replies'),
+            ('pending',   lc.pending   or 0, 'Awaiting classifier'),
+        ] %}
+        {% set label = entry[0] %}
+        {% set count = entry[1] %}
+        {% set desc  = entry[2] %}
+        <div class="stat-box rounded p-6 matrix-hover">
+            <div class="text-matrix-light-green text-sm font-mono">&gt; {{ label | upper }}</div>
+            <div class="text-3xl font-bold matrix-glow mt-2">{{ count }}</div>
+            <div class="text-xs text-matrix-dark-green mt-2">
+                {{ desc }}
+                {% if total_classified %}
+                · {{ '%.0f' % (count * 100 / total_classified) }}%
+                {% endif %}
+            </div>
+            <div class="mt-2">
+                <span class="classification-badge {{ label }}">{{ label }}</span>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    {#- Reused twice: once for the malicious users list, once for the pwned
+        users list. `label_class` picks the badge variant so the heat-bar
+        color matches the same palette as the rest of the dashboard. -#}
+    {% macro user_leaderboard(title, icon, users, label_class, empty_msg) %}
+    <div class="matrix-card rounded-lg p-6">
+        <h2 class="text-xl font-bold matrix-glow mb-4">{{ icon }} {{ title }}</h2>
+        {% if users %}
+        {% set worst_sev = users[0].severity %}
+        <div class="space-y-2">
+            {% for u in users %}
+            <a href="{{ url_for('user_detail') }}?email={{ u.user | urlencode }}"
+               class="block bg-black bg-opacity-50 border border-matrix-dark-green rounded p-3 matrix-hover"
+               style="text-decoration: none; color: inherit;"
+               title="View all messages sent by {{ u.user }}">
+                <div class="flex justify-between items-center mb-1">
+                    <span class="text-matrix-green font-mono text-sm">{{ u.user }}</span>
+                    <span class="text-xs text-matrix-light-green">
+                        sev {{ u.severity }} · {{ u.count }} msg
+                    </span>
+                </div>
+                <div style="height: 6px; background: rgba(0, 60, 0, 0.4); border-radius: 3px; overflow: hidden;">
+                    {% set pct = (u.severity * 100 / worst_sev) if worst_sev else 0 %}
+                    <div style="height: 100%; width: {{ pct }}%;
+                                background: linear-gradient(90deg, #00ff41 0%, #ffaa00 50%, #ff3030 100%);">
+                    </div>
+                </div>
+            </a>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="text-matrix-dark-green text-sm">// {{ empty_msg }}</div>
+        {% endif %}
+    </div>
+    {% endmacro %}
+
+    {% macro message_leaderboard(title, icon, messages, empty_msg) %}
+    <div class="matrix-card rounded-lg p-6">
+        <h2 class="text-xl font-bold matrix-glow mb-4">{{ icon }} {{ title }}</h2>
+        {% if messages %}
+        <div class="space-y-2">
+            {% for m in messages %}
+            <a href="{{ url_for('chat') }}?conv={{ m.conversation_id }}"
+               class="block bg-black bg-opacity-50 border border-matrix-dark-green rounded p-3 matrix-hover"
+               style="text-decoration: none; color: inherit;">
+                <div class="flex justify-between items-start gap-3">
+                    <div style="min-width: 0; flex: 1;">
+                        <div class="text-matrix-green font-mono text-sm" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                            {{ m.subject }}
+                        </div>
+                        <div class="text-xs text-matrix-dark-green mt-1">
+                            from {{ m.sender }} · {{ m.timestamp[:19] | replace('T', ' ') }}
+                        </div>
+                        <div class="text-xs text-matrix-light-green mt-1" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                            {{ m.snippet }}
+                        </div>
+                    </div>
+                    <div style="text-align: right; white-space: nowrap;">
+                        <div class="text-2xl font-bold matrix-glow">{{ m.severity }}</div>
+                        <span class="classification-badge {{ m.label }}">{{ m.label }}</span>
+                    </div>
+                </div>
+            </a>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="text-matrix-dark-green text-sm">// {{ empty_msg }}</div>
+        {% endif %}
+    </div>
+    {% endmacro %}
+
+    <!-- Top attackers vs. top victims, side by side -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+        {{ user_leaderboard(
+            'TOP MALICIOUS USERS', '☠',
+            stats.top_malicious_users, 'malicious',
+            'no malicious senders yet'
+        ) }}
+        {{ user_leaderboard(
+            'TOP PWNED USERS', '⚠',
+            stats.top_pwned_users, 'pwned',
+            'no pwned (victim) senders yet'
+        ) }}
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+        {{ message_leaderboard(
+            'TOP MALICIOUS MESSAGES', '🏴',
+            stats.top_malicious_messages,
+            'no malicious messages scored yet -- click RECLASSIFY ALL above'
+        ) }}
+        {{ message_leaderboard(
+            'TOP PWNED MESSAGES', '☢',
+            stats.top_pwned_messages,
+            'no pwned reply messages scored yet'
+        ) }}
+    </div>
+
     <!-- Charts Section -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
         <!-- Message Distribution Chart -->
@@ -180,9 +309,19 @@
                             <span class="text-matrix-green">[{{ conv.sender }}]</span>
                             <span class="mx-2">➔</span>
                             <span class="text-matrix-dark-green">[{{ conv.receiver }}]</span>
+                            {% if conv.worst_label and conv.worst_label != 'pending' %}
+                            <span class="classification-badge {{ conv.worst_label }}">{{ conv.worst_label }}</span>
+                            {% endif %}
                         </div>
                     </div>
                     <div style="display: flex; gap: 8px; align-items: center;">
+                        {% if conv.max_severity %}
+                        <span class="text-xs px-3 py-1 rounded font-bold"
+                              title="Max severity across all messages in this thread"
+                              style="border: 1px solid #00ff41; color: #00ff41;">
+                            SEV {{ conv.max_severity }}
+                        </span>
+                        {% endif %}
                         <span class="text-xs bg-matrix-dark-green text-black px-3 py-1 rounded font-bold">
                             {{ conv.message_count }} MSGS
                         </span>
@@ -203,7 +342,9 @@
                             {% endif %}
                             [{{ msg.sender }}] {{ msg.timestamp[:19] | replace('T', ' ') }}
                             {% if msg.classification_label %}
-                            <span class="classification-badge {{ msg.classification_label }}">{{ msg.classification_label }}</span>
+                            <span class="classification-badge {{ msg.classification_label }}">
+                                {{ msg.classification_label }}{% if msg.classification_severity %} · {{ msg.classification_severity }}{% endif %}
+                            </span>
                             {% else %}
                             <span class="classification-badge pending">pending</span>
                             {% endif %}
@@ -324,118 +465,180 @@ function runIntro() {
 </script>
 
 <script>
-    // Chart.js color scheme
+    // Chart.js color scheme. The label palette matches the classification
+    // pills in base.html and the chat-bubble tints so a glance at the
+    // chart reads the same way as the rest of the dashboard.
     const chartColors = {
-        green: '#00ff00',
-        darkGreen: '#00cc00',
+        green:      '#00ff00',
+        darkGreen:  '#00cc00',
         lightGreen: '#00ff88',
-        bgDark: 'rgba(0, 20, 0, 0.8)',
-        gridColor: 'rgba(0, 255, 0, 0.1)',
+        bgDark:     'rgba(0, 20, 0, 0.8)',
+        gridColor:  'rgba(0, 255, 0, 0.1)',
+        benign:     '#39ff7a',
+        malicious:  '#ff4d4d',
+        pwned:      '#ffaa33',
+        pending:    'rgba(155, 211, 155, 0.55)',
     };
 
-    // Message Distribution Chart
-    const messageCtx = document.getElementById('messageChart').getContext('2d');
-    new Chart(messageCtx, {
-        type: 'bar',
-        data: {
-            labels: [
-                {% for item in stats.message_distribution %}
-                '{{ item.user.split("@")[0] }}'{% if not loop.last %}, {% endif %}
-        {% endfor %}
-            ],
-        datasets: [{
-            label: 'Messages Sent',
-            data: [
-                {% for item in stats.message_distribution %}
-                    {{ item.count }}{% if not loop.last %}, {% endif %}
-    {% endfor %}
-                ],
-    backgroundColor: chartColors.lightGreen,
-        borderColor: chartColors.green,
-            borderWidth: 2,
-                borderRadius: 4,
-            }]
-        },
-    options: {
-        responsive: true,
-            maintainAspectRatio: false,
-                plugins: {
-            legend: {
-                labels: {
-                    color: chartColors.green,
-                        font: { family: "'Courier New', monospace" }
-                }
-            }
-        },
-        scales: {
-            y: {
-                beginAtZero: true,
-                    ticks: { color: chartColors.green },
-                grid: { color: chartColors.gridColor },
-                border: { color: chartColors.green }
-            },
-            x: {
-                ticks: { color: chartColors.green },
-                grid: { color: chartColors.gridColor },
-                border: { color: chartColors.green }
-            }
-        }
-    }
-    });
+    const distribution = {{ stats.message_distribution | tojson }};
+    const frequency    = {{ stats.conversation_frequency | tojson }};
 
-    // Frequency Chart
-    const frequencyCtx = document.getElementById('frequencyChart').getContext('2d');
-    new Chart(frequencyCtx, {
-        type: 'line',
-        data: {
-            labels: [
-                {% for item in stats.conversation_frequency %}
-                '{{ item.day }}'{% if not loop.last %}, {% endif %}
-        {% endfor %}
-            ],
-        datasets: [{
-            label: 'Conversations/Day',
-            data: [
-                {% for item in stats.conversation_frequency %}
-                    {{ item.count }}{% if not loop.last %}, {% endif %}
-    {% endfor %}
+    const sharedAxisOpts = {
+        y: {
+            beginAtZero: true,
+            stacked: true,
+            ticks: { color: chartColors.green },
+            grid:  { color: chartColors.gridColor },
+            border: { color: chartColors.green },
+        },
+        x: {
+            stacked: true,
+            ticks: { color: chartColors.green },
+            grid:  { color: chartColors.gridColor },
+            border: { color: chartColors.green },
+        },
+    };
+
+    // Stacked-bar message distribution. Each bar is one user; segments
+    // are message counts per classification label so a user who's mostly
+    // benign with a couple of malicious messages reads as a green bar
+    // with a small red tip rather than a uniform green block.
+    new Chart(
+        document.getElementById('messageChart').getContext('2d'),
+        {
+            type: 'bar',
+            data: {
+                labels: distribution.map(d => d.user.split('@')[0]),
+                datasets: [
+                    {
+                        label: 'benign',
+                        data: distribution.map(d => d.benign),
+                        backgroundColor: chartColors.benign,
+                        borderColor: chartColors.benign,
+                        borderWidth: 1,
+                    },
+                    {
+                        label: 'malicious',
+                        data: distribution.map(d => d.malicious),
+                        backgroundColor: chartColors.malicious,
+                        borderColor: chartColors.malicious,
+                        borderWidth: 1,
+                    },
+                    {
+                        label: 'pwned',
+                        data: distribution.map(d => d.pwned),
+                        backgroundColor: chartColors.pwned,
+                        borderColor: chartColors.pwned,
+                        borderWidth: 1,
+                    },
+                    {
+                        label: 'pending',
+                        data: distribution.map(d => d.pending),
+                        backgroundColor: chartColors.pending,
+                        borderColor: chartColors.pending,
+                        borderWidth: 1,
+                    },
                 ],
-    borderColor: chartColors.green,
-        backgroundColor: 'rgba(0, 255, 0, 0.1)',
-            borderWidth: 3,
-                fill: true,
-                    tension: 0.4,
-                        pointBackgroundColor: chartColors.lightGreen,
-                            pointBorderColor: chartColors.green,
-                                pointRadius: 5,
-                                    pointHoverRadius: 7,
-            }]
-        },
-    options: {
-        responsive: true,
-            maintainAspectRatio: false,
-                plugins: {
-            legend: {
-                labels: {
-                    color: chartColors.green,
-                        font: { family: "'Courier New', monospace" }
-                }
-            }
-        },
-        scales: {
-            y: {
-                beginAtZero: true,
-                    ticks: { color: chartColors.green },
-                grid: { color: chartColors.gridColor },
-                border: { color: chartColors.green }
             },
-            x: {
-                ticks: { color: chartColors.green },
-                grid: { color: chartColors.gridColor },
-                border: { color: chartColors.green }
-            }
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        labels: {
+                            color: chartColors.green,
+                            font: { family: "'Courier New', monospace" },
+                        },
+                    },
+                    tooltip: { mode: 'index', intersect: false },
+                },
+                scales: sharedAxisOpts,
+            },
         }
-    }
-    });
+    );
+
+    // Multi-line conversation frequency. Total is the overall daily
+    // count so the chart still shows volume; the malicious + pwned
+    // overlays show how much of that volume is concerning, without
+    // hiding the baseline.
+    new Chart(
+        document.getElementById('frequencyChart').getContext('2d'),
+        {
+            type: 'line',
+            data: {
+                labels: frequency.map(f => f.day),
+                datasets: [
+                    {
+                        label: 'total',
+                        data: frequency.map(f => f.total),
+                        borderColor: chartColors.green,
+                        backgroundColor: 'rgba(0, 255, 0, 0.08)',
+                        borderWidth: 3,
+                        fill: true,
+                        tension: 0.4,
+                        pointBackgroundColor: chartColors.lightGreen,
+                        pointBorderColor: chartColors.green,
+                        pointRadius: 5,
+                        pointHoverRadius: 7,
+                    },
+                    {
+                        label: 'malicious',
+                        data: frequency.map(f => f.malicious),
+                        borderColor: chartColors.malicious,
+                        backgroundColor: 'rgba(255, 77, 77, 0.10)',
+                        borderWidth: 2,
+                        fill: false,
+                        tension: 0.4,
+                        pointBackgroundColor: chartColors.malicious,
+                        pointBorderColor: chartColors.malicious,
+                        pointRadius: 4,
+                        pointHoverRadius: 6,
+                    },
+                    {
+                        label: 'pwned',
+                        data: frequency.map(f => f.pwned),
+                        borderColor: chartColors.pwned,
+                        backgroundColor: 'rgba(255, 170, 51, 0.10)',
+                        borderWidth: 2,
+                        fill: false,
+                        tension: 0.4,
+                        pointBackgroundColor: chartColors.pwned,
+                        pointBorderColor: chartColors.pwned,
+                        pointRadius: 4,
+                        pointHoverRadius: 6,
+                    },
+                ],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        labels: {
+                            color: chartColors.green,
+                            font: { family: "'Courier New', monospace" },
+                        },
+                    },
+                    tooltip: { mode: 'index', intersect: false },
+                },
+                scales: {
+                    // Line chart: don't stack -- we want to read the
+                    // malicious/pwned series as overlays under the total
+                    // curve, not piled on top of each other.
+                    y: {
+                        beginAtZero: true,
+                        ticks: { color: chartColors.green },
+                        grid:  { color: chartColors.gridColor },
+                        border: { color: chartColors.green },
+                    },
+                    x: {
+                        ticks: { color: chartColors.green },
+                        grid:  { color: chartColors.gridColor },
+                        border: { color: chartColors.green },
+                    },
+                },
+            },
+        }
+    );
 </script>
 {% endblock %}

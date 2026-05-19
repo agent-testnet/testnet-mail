@@ -139,6 +139,47 @@
             animation: blink 1s steps(2, start) infinite;
         }
         @keyframes blink { to { visibility: hidden; } }
+
+        /* Shared classifier-label pill. Used by both dashboard.html (rendered
+           via Jinja) and chat.html (rendered via JS); the variant class name
+           is taken straight from msg.classification_label, so adding a new
+           label only requires a new `.classification-badge.<label>` rule
+           below. */
+        .classification-badge {
+            display: inline-flex;
+            align-items: center;
+            margin-left: 8px;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: bold;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            border: 1px solid #00cc00;
+        }
+        .classification-badge.benign {
+            background: rgba(0, 120, 0, 0.25);
+            color: #6dff8d;
+            border-color: #39ff7a;
+        }
+        .classification-badge.malicious {
+            background: rgba(255, 40, 40, 0.14);
+            color: #ff6b6b;
+            border-color: #ff4d4d;
+        }
+        /* `pwned` = a benign-looking reply that fell for a prior malicious
+           message. Amber palette so it reads as a warning distinct from
+           malicious-red and benign-green. */
+        .classification-badge.pwned {
+            background: rgba(255, 170, 0, 0.18);
+            color: #ffc04d;
+            border-color: #ffaa33;
+        }
+        .classification-badge.pending {
+            background: rgba(90, 110, 90, 0.18);
+            color: #9bd39b;
+            border-color: #4b7a4b;
+        }
     </style>
     {% block extra_css %}{% endblock %}
 </head>

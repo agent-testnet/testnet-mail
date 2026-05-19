@@ -7,7 +7,16 @@ PROVIDER_GEMINI = "gemini"
 PROVIDER_OPENROUTER = "openrouter"
 SUPPORTED_PROVIDERS = (PROVIDER_GEMINI, PROVIDER_OPENROUTER)
 
-DEFAULT_ACCOUNT_NAMES = ("alice", "bob", "charlie", "diana")
+# Default IMAP mailboxes when CLASSIFIER_ACCOUNTS is unset. Passwords must
+# match the mailserver (demo seeds use *-password; agent mailboxes do not).
+DEFAULT_ACCOUNTS = (
+    ("alice", "alice-password"),
+    ("bob", "bob-password"),
+    ("charlie", "charlie-password"),
+    ("diana", "diana-password"),
+    ("lobby", "lobbypass"),
+    ("mrsmith", "smithpass"),
+)
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
 DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash-lite"
 
@@ -36,8 +45,8 @@ class Settings:
 def _parse_accounts(raw_accounts: str | None, mail_domain: str) -> tuple[MailAccount, ...]:
     if not raw_accounts:
         return tuple(
-            MailAccount(f"{name}@{mail_domain}", f"{name}-password")
-            for name in DEFAULT_ACCOUNT_NAMES
+            MailAccount(f"{local}@{mail_domain}", password)
+            for local, password in DEFAULT_ACCOUNTS
         )
 
     accounts: list[MailAccount] = []

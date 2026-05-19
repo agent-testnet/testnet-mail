@@ -14,6 +14,8 @@ from flask import (
     session,
     make_response,
     abort,
+    flash,
+    get_flashed_messages,
 )
 from datetime import datetime, timedelta
 import imaplib
@@ -122,6 +124,9 @@ TEST_ACCOUNTS = [
     {"email": f"bob@{MAIL_DOMAIN}", "password": "bob-password"},
     {"email": f"charlie@{MAIL_DOMAIN}", "password": "charlie-password"},
     {"email": f"diana@{MAIL_DOMAIN}", "password": "diana-password"},
+    # Live agent mailboxes (not created by seed-conversations.sh).
+    {"email": f"lobby@{MAIL_DOMAIN}", "password": "lobbypass"},
+    {"email": f"mrsmith@{MAIL_DOMAIN}", "password": "smithpass"},
 ]
 
 
@@ -155,6 +160,35 @@ def _valid_csrf():
     if not cookie or not form_value:
         return False
     return hmac.compare_digest(cookie, form_value)
+
+
+# ── Session-scoped CSRF (for authenticated POSTs) ────────────────────────────
+#
+# The login flow above uses a per-request cookie-scoped CSRF token because
+# the session doesn't exist yet at that point. Once the operator is logged
+# in we mint a stable token inside the Flask session itself and reuse it
+# across every authenticated POST form (reclassify, future actions), so we
+# don't have to attach a fresh cookie on every render.
+
+def _session_csrf_token() -> str:
+    """Return the per-session CSRF token, minting it on first access.
+
+    Templates rendered by authenticated GET handlers receive this value as
+    `csrf_token` and embed it as a hidden form field. The matching POST
+    handler validates it via `_valid_session_csrf()`."""
+    token = session.get('csrf')
+    if not token:
+        token = secrets.token_hex(16)
+        session['csrf'] = token
+    return token
+
+
+def _valid_session_csrf() -> bool:
+    expected = session.get('csrf', '')
+    form_value = request.form.get(CSRF_COOKIE_NAME, '')
+    if not expected or not form_value:
+        return False
+    return hmac.compare_digest(expected, form_value)
 
 
 def _render_login(error, next_target, status=200):
@@ -294,7 +328,8 @@ def load_classifications(message_refs):
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 f"""
-                SELECT account_email, message_id, classification_status, classification_label
+                SELECT account_email, message_id, classification_status,
+                       classification_label, classification_severity
                 FROM classifier_emails
                 WHERE (account_email, message_id) IN ({placeholders})
                 """,
@@ -308,8 +343,58 @@ def load_classifications(message_refs):
         (row["account_email"], row["message_id"]): {
             "status": row["classification_status"],
             "label": row["classification_label"] or "",
+            # Coerce NULL severity to 0 so downstream aggregation
+            # (max/sum) doesn't need to special-case None at every call
+            # site. Genuinely-pending rows just contribute 0.
+            "severity": row["classification_severity"] or 0,
         }
         for row in rows
+    }
+
+
+# Precedence used when reducing per-message labels to a single conversation
+# badge: higher number = more important to surface. `pwned` outranks
+# `malicious` because it tells the operator someone already fell for the
+# attack, not just that the inbox received one.
+_LABEL_RANK = {"pending": 0, "benign": 1, "malicious": 2, "pwned": 3}
+
+
+def _conversation_aggregates(messages):
+    """Compute conversation-level fields from its list of messages.
+
+    Returned keys:
+      max_severity   -- highest severity across messages (0 if all pending)
+      total_severity -- sum across messages, used for 3D node sizing
+      worst_label    -- highest-precedence label that appears in the thread
+      label_counts   -- per-label tallies for the dashboard stats panels
+    """
+    counts = {"benign": 0, "malicious": 0, "pwned": 0, "pending": 0}
+    max_severity = 0
+    total_severity = 0
+    worst_label = "pending"
+    worst_rank = _LABEL_RANK["pending"]
+
+    for msg in messages:
+        label = msg.get("classification_label") or "pending"
+        if label not in counts:
+            label = "pending"
+        counts[label] += 1
+
+        severity = int(msg.get("classification_severity") or 0)
+        if severity > max_severity:
+            max_severity = severity
+        total_severity += severity
+
+        rank = _LABEL_RANK.get(label, 0)
+        if rank > worst_rank:
+            worst_rank = rank
+            worst_label = label
+
+    return {
+        "max_severity": max_severity,
+        "total_severity": total_severity,
+        "worst_label": worst_label,
+        "label_counts": counts,
     }
 
 def fetch_conversations():
@@ -417,57 +502,204 @@ def fetch_conversations():
                     classification = classifications.get((msg["account_email"], msg["message_id"]), {})
                     msg["classification_status"] = classification.get("status", "pending")
                     msg["classification_label"] = classification.get("label", "")
+                    msg["classification_severity"] = classification.get("severity", 0)
 
                 # Sort messages by timestamp to maintain conversation order
                 sorted_messages = sorted(conv_data["messages"], key=lambda x: x["timestamp"])
                 print(f"Conversation {conv_id}: {participants[0]} ↔ {participants[1]}")
                 for i, msg in enumerate(sorted_messages):
                     print(f"  Message {i+1}: {msg['sender']} @ {msg['timestamp']}")
+
+                aggregates = _conversation_aggregates(sorted_messages)
                 result.append({
                     "id": conv_id,
                     "sender": participants[0],
                     "receiver": participants[1],
                     "messages": sorted_messages,
-                    "message_count": len(sorted_messages)
+                    "message_count": len(sorted_messages),
+                    **aggregates,
                 })
-    
+
+    # Sort conversations so the most recently active thread is on top in the
+    # chat sidebar and the dashboard cards. messages[-1] is the newest because
+    # sorted_messages above is timestamp-ascending.
+    result.sort(key=lambda c: c["messages"][-1]["timestamp"], reverse=True)
+
     return result
 
-def get_real_stats():
-    """Generate statistics from real data"""
-    conversations = fetch_conversations()
-    
-    user_message_count = defaultdict(int)
+_LABEL_KEYS = ("benign", "malicious", "pwned", "pending")
+_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _msg_label(msg):
+    """Bucket name for stats roll-ups: any unknown / empty label is
+    coerced to `pending` so we never end up with stray keys."""
+    label = msg.get("classification_label") or "pending"
+    return label if label in _LABEL_KEYS else "pending"
+
+
+def get_real_stats(conversations=None):
+    """Generate statistics from real data.
+
+    Accepts an optional pre-fetched conversations list so callers (e.g.
+    `index()`) that need both the conversations and the stats don't pay
+    for two IMAP roundtrips and two SQLite reads. Falls back to fetching
+    when called without context (the `/api/stats` endpoint)."""
+    if conversations is None:
+        conversations = fetch_conversations()
+
+    # Per-user message counts split by classification label so the bar
+    # chart can render a stacked breakdown (benign / malicious / pwned /
+    # pending) per user instead of a single flat total. The dict
+    # comprehension uses _LABEL_KEYS so every user dict has the same shape
+    # even when they've only ever sent benign mail.
+    user_label_counts = defaultdict(lambda: {k: 0 for k in _LABEL_KEYS})
     for conv in conversations:
         for msg in conv["messages"]:
-            user_message_count[msg["sender"]] += 1
-    
-    # Get conversation frequency by day
-    freq_by_day = defaultdict(int)
-    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    
+            user_label_counts[msg["sender"]][_msg_label(msg)] += 1
+
+    # Per-day frequency tracked separately for total / malicious / pwned
+    # so the line chart can layer three series. Total is the sum across
+    # all labels, not just malicious+pwned, so the chart still reflects
+    # how busy each weekday is overall.
+    freq_by_day = {day: {"total": 0, "malicious": 0, "pwned": 0} for day in _DAYS}
     for conv in conversations:
         for msg in conv["messages"]:
             try:
                 dt = datetime.fromisoformat(msg["timestamp"])
-                day_name = days[dt.weekday()]
-                freq_by_day[day_name] += 1
-            except:
-                pass
-    
+            except (TypeError, ValueError):
+                continue
+            day_name = _DAYS[dt.weekday()]
+            bucket = freq_by_day[day_name]
+            bucket["total"] += 1
+            label = _msg_label(msg)
+            if label in bucket:
+                bucket[label] += 1
+
+    active_users = sum(1 for buckets in user_label_counts.values()
+                       if sum(buckets.values()) > 0)
+
+    classification_stats = _compute_classification_stats(conversations)
+
     return {
         "total_users": len(TEST_ACCOUNTS),
         "total_conversations": len(conversations),
         "total_messages": sum(c["message_count"] for c in conversations),
-        "active_today": len([u for u in user_message_count if user_message_count[u] > 0]),
+        "active_today": active_users,
         "message_distribution": [
-            {"user": user, "count": count}
-            for user, count in sorted(user_message_count.items())
+            {
+                "user": user,
+                "total": sum(buckets.values()),
+                **buckets,
+            }
+            # Sort by total desc so the busiest mailbox sits on the left
+            # of the bar chart; alphabetical fallback keeps the order
+            # deterministic when two users tie.
+            for user, buckets in sorted(
+                user_label_counts.items(),
+                key=lambda item: (-sum(item[1].values()), item[0]),
+            )
         ],
         "conversation_frequency": [
-            {"day": day, "count": freq_by_day.get(day, 0)}
-            for day in days
-        ]
+            {
+                "day": day,
+                "total": freq_by_day[day]["total"],
+                "malicious": freq_by_day[day]["malicious"],
+                "pwned": freq_by_day[day]["pwned"],
+            }
+            for day in _DAYS
+        ],
+        **classification_stats,
+    }
+
+
+def _compute_classification_stats(conversations):
+    """Roll per-message classifications into dashboard-wide stats, keeping
+    `malicious` and `pwned` in separate buckets so the UI can rank
+    attackers and victims independently.
+
+    Returned keys:
+      label_counts             -- benign/malicious/pwned/pending totals
+      top_malicious_users      -- top 10 senders of `malicious` mail
+      top_pwned_users          -- top 10 senders of `pwned` replies (victims)
+      top_malicious_messages   -- top 10 `malicious` messages by severity
+      top_pwned_messages       -- top 10 `pwned` messages by severity
+    """
+    label_counts = {k: 0 for k in _LABEL_KEYS}
+    # Per-sender tallies. We rank attackers by who *sends* malicious mail
+    # (not who happens to share a conversation with one), and victims by
+    # who sends `pwned` replies, because that's the message whose author
+    # got compromised.
+    sender_buckets = defaultdict(lambda: {
+        "malicious_count": 0,
+        "malicious_severity": 0,
+        "pwned_count": 0,
+        "pwned_severity": 0,
+    })
+    malicious_messages = []
+    pwned_messages = []
+
+    for conv in conversations:
+        for label, count in conv.get("label_counts", {}).items():
+            label_counts[label] = label_counts.get(label, 0) + count
+
+        for msg in conv["messages"]:
+            label = _msg_label(msg)
+            severity = int(msg.get("classification_severity") or 0)
+            sender = msg.get("sender") or "(unknown)"
+
+            if label == "malicious":
+                sender_buckets[sender]["malicious_count"] += 1
+                sender_buckets[sender]["malicious_severity"] += severity
+            elif label == "pwned":
+                sender_buckets[sender]["pwned_count"] += 1
+                sender_buckets[sender]["pwned_severity"] += severity
+
+            if label in ("malicious", "pwned") and severity > 0:
+                text = msg.get("text") or ""
+                snippet = text[:140] + ("…" if len(text) > 140 else "")
+                row = {
+                    "severity": severity,
+                    "label": label,
+                    "sender": sender,
+                    "subject": msg.get("subject") or "(no subject)",
+                    "snippet": snippet,
+                    "timestamp": msg.get("timestamp") or "",
+                    "conversation_id": conv["id"],
+                }
+                if label == "malicious":
+                    malicious_messages.append(row)
+                else:
+                    pwned_messages.append(row)
+
+    def _top_users(label_key, count_field, severity_field):
+        return sorted(
+            (
+                {
+                    "user": user,
+                    "count": buckets[count_field],
+                    "severity": buckets[severity_field],
+                }
+                for user, buckets in sender_buckets.items()
+                if buckets[count_field] > 0
+            ),
+            # Primary: severity (intensity), secondary: count (volume).
+            # Keeps a single high-severity row above a noise floor of
+            # low-severity ones.
+            key=lambda u: (u["severity"], u["count"]),
+            reverse=True,
+        )[:10]
+
+    return {
+        "label_counts": label_counts,
+        "top_malicious_users": _top_users("malicious", "malicious_count", "malicious_severity"),
+        "top_pwned_users": _top_users("pwned", "pwned_count", "pwned_severity"),
+        "top_malicious_messages": sorted(
+            malicious_messages, key=lambda m: m["severity"], reverse=True
+        )[:10],
+        "top_pwned_messages": sorted(
+            pwned_messages, key=lambda m: m["severity"], reverse=True
+        )[:10],
     }
 
 @app.route('/')
@@ -475,25 +707,33 @@ def get_real_stats():
 def index():
     """Main dashboard page"""
     conversations = fetch_conversations()
-    stats = get_real_stats()
+    stats = get_real_stats(conversations=conversations)
     return render_template('dashboard.html',
                          conversations=conversations,
                          stats=stats,
-                         active_nav='dashboard')
+                         active_nav='dashboard',
+                         csrf_token=_session_csrf_token(),
+                         flashes=get_flashed_messages(with_categories=True))
 
 @app.route('/chat')
 @login_required
 def chat():
     """Chat view page"""
     conversations = fetch_conversations()
-    return render_template('chat.html', conversations=conversations, active_nav='chat')
+    return render_template('chat.html',
+                         conversations=conversations,
+                         active_nav='chat',
+                         csrf_token=_session_csrf_token())
 
 @app.route('/visualize')
 @login_required
 def visualize():
     """3D conversation network view"""
     conversations = fetch_conversations()
-    return render_template('visualize.html', conversations=conversations, active_nav='visualize')
+    return render_template('visualize.html',
+                         conversations=conversations,
+                         active_nav='visualize',
+                         csrf_token=_session_csrf_token())
 
 @app.route('/api/conversations')
 @login_required
@@ -515,6 +755,132 @@ def api_conversation_detail(conversation_id):
     if 0 <= conversation_id < len(conversations):
         return jsonify(conversations[conversation_id])
     return jsonify({"error": "Conversation not found"}), 404
+
+
+@app.route('/user')
+@login_required
+def user_detail():
+    """All messages sent by a single user, with deep links back to their
+    conversations. Reached by clicking a user name in any of the top
+    leaderboards on the dashboard."""
+    email_addr = (request.args.get('email') or '').strip().lower()
+    if not email_addr:
+        abort(400, description='Missing required `email` query parameter.')
+
+    conversations = fetch_conversations()
+    summary = _user_message_summary(conversations, email_addr)
+
+    return render_template(
+        'user.html',
+        email=email_addr,
+        summary=summary,
+        active_nav='',
+        csrf_token=_session_csrf_token(),
+    )
+
+
+def _user_message_summary(conversations, email_addr):
+    """Walk all conversations and pull out the per-user view that the
+    /user page renders:
+      messages       -- every message *sent by* this user, newest first,
+                        each carrying the conversation id, counterparty,
+                        classification label + severity, and a snippet.
+      label_counts   -- benign/malicious/pwned/pending sent by this user.
+      avg_severity   -- mean severity across classified sent messages.
+      max_severity   -- the worst single message they sent.
+      conversations  -- list of {id, counterparty, message_count,
+                        worst_label, max_severity} for every thread they
+                        participate in, so the page can also link back
+                        to whole threads (which include the *incoming*
+                        side that the flat per-message list omits)."""
+    sent_messages = []
+    label_counts = {k: 0 for k in _LABEL_KEYS}
+    severities = []
+    participates_in = []
+
+    for conv in conversations:
+        if email_addr not in (conv["sender"], conv["receiver"]):
+            continue
+        counterparty = conv["receiver"] if conv["sender"] == email_addr else conv["sender"]
+        participates_in.append({
+            "id": conv["id"],
+            "counterparty": counterparty,
+            "message_count": conv["message_count"],
+            "worst_label": conv.get("worst_label", "pending"),
+            "max_severity": conv.get("max_severity", 0),
+        })
+
+        for msg in conv["messages"]:
+            if msg.get("sender") != email_addr:
+                continue
+            label = _msg_label(msg)
+            severity = int(msg.get("classification_severity") or 0)
+            label_counts[label] += 1
+            if severity > 0:
+                severities.append(severity)
+
+            text = msg.get("text") or ""
+            snippet = text[:200] + ("…" if len(text) > 200 else "")
+            sent_messages.append({
+                "conversation_id": conv["id"],
+                "counterparty": counterparty,
+                "subject": msg.get("subject") or "(no subject)",
+                "snippet": snippet,
+                "timestamp": msg.get("timestamp") or "",
+                "label": label,
+                "severity": severity,
+            })
+
+    # Newest first matches the rest of the dashboard's ordering.
+    sent_messages.sort(key=lambda m: m["timestamp"], reverse=True)
+    # Thread cards: surface the most-severe thread first so an operator
+    # opens the worst one with one click.
+    participates_in.sort(
+        key=lambda c: (c["max_severity"], c["message_count"]), reverse=True
+    )
+
+    return {
+        "messages": sent_messages,
+        "label_counts": label_counts,
+        "total_sent": len(sent_messages),
+        "max_severity": max(severities) if severities else 0,
+        "avg_severity": round(sum(severities) / len(severities)) if severities else 0,
+        "conversations": participates_in,
+    }
+
+
+@app.route('/reclassify', methods=['POST'])
+@login_required
+def reclassify():
+    """Reset every classifier_emails row back to 'pending' so the
+    mail-classifier worker reprocesses them under the current prompt and
+    label set on its next poll (~15s). No service restart required."""
+    if not _valid_session_csrf():
+        abort(403, description='Invalid CSRF token. Please reload the dashboard and try again.')
+
+    try:
+        with sqlite3.connect(CLASSIFIER_DB_PATH) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE classifier_emails
+                SET classification_status   = 'pending',
+                    classification_label    = NULL,
+                    classification_reason   = NULL,
+                    classification_severity = NULL,
+                    classification_attempts = 0,
+                    last_error              = NULL,
+                    classified_at           = NULL
+                """
+            )
+            reset_count = cursor.rowcount
+        flash(f"Queued {reset_count} messages for reclassification. "
+              f"The worker will reprocess them on its next poll (~15s).",
+              "success")
+    except sqlite3.Error as exc:
+        print(f"Reclassify failed: {exc}")
+        flash(f"Reclassify failed: {exc}", "error")
+
+    return redirect(url_for('index'))
 
 
 # ── Auth routes ──────────────────────────────────────────────────────────────

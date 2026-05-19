@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}User Detail - {{ email }}{% endblock %}
+
+{% block content %}
+<div class="container mx-auto px-4 py-6" style="max-width: 1200px;">
+
+    <!-- Header -->
+    <div class="matrix-header mb-6 p-6 rounded-lg">
+        <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;">
+            <div style="flex: 1; min-width: 0;">
+                <div class="text-matrix-light-green text-sm font-mono mb-1">&gt; USER_PROFILE</div>
+                <h1 class="text-3xl font-bold matrix-glow" style="overflow-wrap: anywhere;">{{ email }}</h1>
+                <div class="mt-4 text-xs text-matrix-dark-green">
+                    [SENT: {{ summary.total_sent }}]
+                    · [MAX_SEV: {{ summary.max_severity }}]
+                    · [AVG_SEV: {{ summary.avg_severity }}]
+                    · [THREADS: {{ summary.conversations | length }}]
+                </div>
+            </div>
+            <a href="{{ url_for('index') }}"
+               class="matrix-hover"
+               style="background: rgba(0, 30, 0, 0.6); border: 1px solid #00ff41; color: #00ff41;
+                      padding: 10px 16px; border-radius: 4px; cursor: pointer; text-decoration: none;
+                      font-family: 'Courier New', monospace; font-size: 13px; letter-spacing: 1px;">
+                &larr; DASHBOARD
+            </a>
+        </div>
+    </div>
+
+    {# Per-label breakdown of *sent* messages, mirroring the dashboard's
+       CLASSIFICATION BREAKDOWN stat row but scoped to this user. #}
+    {% set lc = summary.label_counts %}
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+        {% for entry in [
+            ('benign',    lc.benign,    'sent benign'),
+            ('malicious', lc.malicious, 'sent malicious'),
+            ('pwned',     lc.pwned,     'sent as victim'),
+            ('pending',   lc.pending,   'awaiting classifier'),
+        ] %}
+        <div class="stat-box rounded p-6 matrix-hover">
+            <div class="text-matrix-light-green text-sm font-mono">&gt; {{ entry[0] | upper }}</div>
+            <div class="text-3xl font-bold matrix-glow mt-2">{{ entry[1] }}</div>
+            <div class="text-xs text-matrix-dark-green mt-2">{{ entry[2] }}</div>
+            <div class="mt-2">
+                <span class="classification-badge {{ entry[0] }}">{{ entry[0] }}</span>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- Threads this user participates in (incoming + outgoing) -->
+    {% if summary.conversations %}
+    <div class="matrix-card rounded-lg p-6 mb-8">
+        <h2 class="text-xl font-bold matrix-glow mb-4">🧵 THREADS</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {% for c in summary.conversations %}
+            <a href="{{ url_for('chat') }}?conv={{ c.id }}"
+               class="block bg-black bg-opacity-50 border border-matrix-dark-green rounded p-3 matrix-hover"
+               style="text-decoration: none; color: inherit;">
+                <div class="flex justify-between items-center gap-3">
+                    <div class="text-matrix-green font-mono text-sm" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;">
+                        &harr; {{ c.counterparty }}
+                    </div>
+                    <div class="text-xs text-matrix-light-green" style="white-space: nowrap;">
+                        {% if c.worst_label and c.worst_label != 'pending' %}
+                        <span class="classification-badge {{ c.worst_label }}">{{ c.worst_label }}</span>
+                        {% endif %}
+                        · {{ c.message_count }} msg
+                        {% if c.max_severity %} · sev {{ c.max_severity }}{% endif %}
+                    </div>
+                </div>
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Flat list of every message this user has SENT -->
+    <div class="matrix-card rounded-lg p-6 mb-8">
+        <h2 class="text-xl font-bold matrix-glow mb-4">✉ SENT MESSAGES ({{ summary.messages | length }})</h2>
+        {% if summary.messages %}
+        <div class="space-y-2">
+            {% for m in summary.messages %}
+            <a href="{{ url_for('chat') }}?conv={{ m.conversation_id }}"
+               class="block bg-black bg-opacity-50 border border-matrix-dark-green rounded p-3 matrix-hover"
+               style="text-decoration: none; color: inherit;">
+                <div class="flex justify-between items-start gap-3">
+                    <div style="min-width: 0; flex: 1;">
+                        <div class="text-matrix-green font-mono text-sm" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                            {{ m.subject }}
+                        </div>
+                        <div class="text-xs text-matrix-dark-green mt-1">
+                            &rarr; {{ m.counterparty }} · {{ m.timestamp[:19] | replace('T', ' ') }}
+                        </div>
+                        <div class="text-xs text-matrix-light-green mt-1" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                            {{ m.snippet }}
+                        </div>
+                    </div>
+                    <div style="text-align: right; white-space: nowrap;">
+                        {% if m.severity %}
+                        <div class="text-2xl font-bold matrix-glow">{{ m.severity }}</div>
+                        {% endif %}
+                        <span class="classification-badge {{ m.label }}">
+                            {{ m.label }}{% if m.severity %} · {{ m.severity }}{% endif %}
+                        </span>
+                    </div>
+                </div>
+            </a>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="text-matrix-dark-green text-sm">// {{ email }} has not sent any messages visible to the dashboard</div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

@@ -147,5 +147,24 @@ send_message_once "accounts@payment-services-now.io" "$A" \
   "Your account is 90 days overdue. Pay \$1,847.32 within 24 hours to avoid collections, credit damage, and legal action. Wire payment to IBAN GB29NWBK60161331926819. Failure to respond will result in immediate court proceedings."
 
 echo ""
+echo "Seeding pwned example (internal phishing + victim reply)..."
+
+# Both sides of this exchange are monitored mailboxes (charlie + diana), so
+# the classifier sees:
+#   1. charlie -> diana phishing-style request   => `malicious` in diana's INBOX
+#   2. diana -> charlie compliant reply          => `pwned`     in charlie's INBOX
+# The second classification works because the service now passes the prior
+# `malicious` message in this thread as context, which the LLM needs to
+# distinguish a `pwned` victim-reply from a generic `benign` one.
+
+send_message_once "$C" "$D" \
+  "URGENT: please pay this vendor invoice today" 35 \
+  "Diana, the CFO needs you to wire \$8,500 to a new vendor today before close of business. Use IBAN GB82WEST12345698765432, reference INV-2026-0518. Don't loop in finance, they already approved it. Reply with the confirmation number once it's sent. Thanks."
+
+send_message_once "$D" "$C" \
+  "Re: URGENT: please pay this vendor invoice today" 28 \
+  "Hi, wire sent. Confirmation number: TXN-77419-2026. The bank flagged it but I overrode the warning since you said it was urgent. Let me know if you need anything else."
+
+echo ""
 echo "Seeding complete. The mail-classifier picks up new messages on its"
-echo "next poll (~15s) and labels them benign/malicious in the dashboard."
+echo "next poll (~15s) and labels them benign/malicious/pwned in the dashboard."

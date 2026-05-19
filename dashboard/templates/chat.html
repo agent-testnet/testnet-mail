@@ -118,6 +118,23 @@
         border: 2px solid #00ff00;
         margin: 8px;
         border-radius: 4px;
+        /* Allow this flex item to shrink below its content size so the
+           inner .messages-container can actually overflow and scroll. */
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    /* The JS swaps the content of this wrapper. It must itself be a
+       flex column that fills .chat-area, otherwise its children
+       (.chat-header + .messages-container) don't participate in the
+       chat-area's flex layout and .messages-container's `flex: 1`
+       + `overflow-y: auto` never gets a bounded height to scroll in. */
+    #chatContent {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
     }
 
     .chat-header {
@@ -169,6 +186,9 @@
         display: flex;
         flex-direction: column;
         gap: 12px;
+        /* Same reason as on .chat-area: needed for the flex item to
+           shrink below content size so overflow-y can take effect. */
+        min-height: 0;
     }
 
     .message-group {
@@ -226,6 +246,32 @@
         text-shadow: 0 0 5px rgba(0, 255, 136, 0.3);
     }
 
+    /* Label-tinted bubbles. These intentionally come AFTER .message.incoming
+       and .message.outgoing so that, at equal specificity, source order wins
+       and the classification color overrides the direction's default green.
+       The direction is still visually preserved by .message-group flex
+       alignment, so collapsing the color distinction here doesn't lose any
+       information. .label-benign is a no-op (keeps the green default). */
+    .message.label-malicious {
+        background: rgba(255, 40, 40, 0.18);
+        color: #ff9c9c;
+        border: 1px solid #ff4d4d;
+        text-shadow: 0 0 6px rgba(255, 80, 80, 0.35);
+    }
+
+    .message.label-pwned {
+        background: rgba(255, 170, 0, 0.18);
+        color: #ffd082;
+        border: 1px solid #ffaa33;
+        text-shadow: 0 0 6px rgba(255, 170, 0, 0.35);
+    }
+
+    .message.label-pending {
+        background: rgba(60, 70, 60, 0.4);
+        color: #9bd39b;
+        border: 1px solid #4b7a4b;
+    }
+
     .message-time {
         font-size: 10px;
         color: #00cc00;
@@ -233,36 +279,8 @@
         font-family: 'Courier New', monospace;
     }
 
-    .classification-badge {
-        display: inline-flex;
-        align-items: center;
-        margin-left: 8px;
-        padding: 2px 8px;
-        border-radius: 999px;
-        font-size: 10px;
-        font-weight: bold;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        border: 1px solid #00cc00;
-    }
-
-    .classification-badge.benign {
-        background: rgba(0, 120, 0, 0.25);
-        color: #6dff8d;
-        border-color: #39ff7a;
-    }
-
-    .classification-badge.malicious {
-        background: rgba(255, 40, 40, 0.14);
-        color: #ff6b6b;
-        border-color: #ff4d4d;
-    }
-
-    .classification-badge.pending {
-        background: rgba(90, 110, 90, 0.18);
-        color: #9bd39b;
-        border-color: #4b7a4b;
-    }
+    /* .classification-badge styling lives in base.html so dashboard.html and
+       chat.html stay in sync. */
 
     /* Empty state */
     .empty-state {
@@ -351,10 +369,16 @@
             <ul class="conversations-list" id="conversationsList">
                 {% for conv in conversations %}
                 <li class="conversation-item" data-conv-id="{{ conv.id }}" onclick="selectConversation({{ conv.id }})">
-                    <div class="conversation-info">
+                    <div class="conversation-info" style="flex: 1; min-width: 0;">
                         <div class="conversation-name">[{{ conv.sender }}]</div>
                         <div class="conversation-name">↔ [{{ conv.receiver }}]</div>
                         <div class="conversation-preview">&gt; {{ conv.messages[-1].text[:40] }}...</div>
+                        {% if conv.worst_label and conv.worst_label != 'pending' %}
+                        <div style="margin-top: 4px;">
+                            <span class="classification-badge {{ conv.worst_label }}">{{ conv.worst_label }}</span>
+                            <span style="font-size: 10px; color: #00cc00; margin-left: 4px;">sev {{ conv.max_severity }}</span>
+                        </div>
+                        {% endif %}
                     </div>
                 </li>
                 {% endfor %}
@@ -405,7 +429,11 @@
 
     function renderClassificationBadge(msg) {
         const label = msg.classification_label || 'pending';
-        return `<span class="classification-badge ${escapeHtml(label)}">${escapeHtml(label)}</span>`;
+        const sev = Number(msg.classification_severity) || 0;
+        // Append the numeric severity to the pill when we actually have one
+        // so pending rows (no score yet) keep showing just the word.
+        const suffix = sev > 0 ? ` · ${sev}` : '';
+        return `<span class="classification-badge ${escapeHtml(label)}">${escapeHtml(label)}${suffix}</span>`;
     }
 
     function renderChat(conv) {
@@ -429,13 +457,17 @@
             const isOutgoing = msg.sender === conv.sender;
             const className = isOutgoing ? 'outgoing' : 'incoming';
             const icon = isOutgoing ? '>' : '<';
+            // label class drives the bubble color via .message.label-* in CSS;
+            // we still emit `incoming`/`outgoing` because they own alignment
+            // and the size of the bubble's max-width.
+            const labelClass = 'label-' + (msg.classification_label || 'pending');
             return `
                     <div class="message-group ${className}">
                         <div class="message-wrapper">
                             <div style="font-size: 11px; color: #00cc00; margin-bottom: 4px; font-family: 'Courier New', monospace;">
                                 [${escapeHtml(msg.sender)}] ${renderClassificationBadge(msg)}
                             </div>
-                            <div class="message ${className}">
+                            <div class="message ${className} ${labelClass}">
                                 <span style="color: #00cc00;">[${icon}]</span> ${escapeHtml(msg.text)}
                             </div>
                             <div class="message-time">&gt; ${formatTime(msg.timestamp)}</div>

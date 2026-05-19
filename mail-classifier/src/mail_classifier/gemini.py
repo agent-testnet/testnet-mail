@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from google import genai
 from google.genai import types
 
 from .classification import (
     SYSTEM_INSTRUCTION,
     ClassificationResult,
+    PriorMessage,
     build_prompt,
     parse_classification_payload,
 )
@@ -27,10 +30,20 @@ class GeminiClient:
         self.client = genai.Client(vertexai=True, api_key=api_key)
 
     def classify_email(
-        self, *, sender: str, recipient: str, subject: str, body_text: str
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        subject: str,
+        body_text: str,
+        prior_messages: Sequence[PriorMessage] = (),
     ) -> ClassificationResult:
         prompt = build_prompt(
-            sender=sender, recipient=recipient, subject=subject, body_text=body_text
+            sender=sender,
+            recipient=recipient,
+            subject=subject,
+            body_text=body_text,
+            prior_messages=prior_messages,
         )
         response = self.client.models.generate_content(
             model=self.model_name,

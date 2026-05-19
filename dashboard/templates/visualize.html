@@ -141,7 +141,13 @@
     </div>
 
     <div class="viz-legend">
-        <div><span style="color:#00ff41;">●</span> node = user</div>
+        <div><span style="color:#00ff41;">●</span> node = user (size + color = aggregate maliciousness)</div>
+        <div>
+            <span style="color:#00ff41;">●</span>
+            <span style="color:#ffaa00;">●</span>
+            <span style="color:#ff3030;">●</span>
+            green &rarr; amber &rarr; red as severity grows
+        </div>
         <div><span style="color:#00ff41;">―</span> edge = conversation</div>
         <div><span style="color:#00ff41;">▢</span> window = email preview</div>
         <div>click node &rarr; spawn windows</div>
@@ -291,8 +297,10 @@ function makeEmailCardTexture(msg, index, conv) {
     c.fillRect(24, H - 38, W - 48, 1);
     c.fillStyle = '#66ff99';
     c.font = "11px 'Courier New', monospace";
+    const severity = Number(msg.classification_severity) || 0;
+    const sevSuffix = severity > 0 ? ` · ${severity}` : '';
     const label = msg.classification_label
-        ? '> CLASS: ' + String(msg.classification_label).toUpperCase()
+        ? '> CLASS: ' + String(msg.classification_label).toUpperCase() + sevSuffix
         : '> STATUS: ' + String(msg.classification_status || 'pending').toUpperCase();
     c.fillText(label, 24, H - 18);
 
@@ -705,9 +713,16 @@ function renderDetail(email) {
     ];
     convs.forEach(c => {
         const other = c.sender === email ? c.receiver : c.sender;
+        const showBadge = c.worst_label && c.worst_label !== 'pending';
+        const badgeHtml = showBadge
+            ? `<span class="classification-badge ${escapeHTML(c.worst_label)}">${escapeHTML(c.worst_label)}</span>`
+            : '';
+        const sevHtml = c.max_severity
+            ? ` · sev ${c.max_severity}`
+            : '';
         lines.push(`<a class="conv-pill" href="${CHAT_URL}?conv=${c.id}">
-            <div>&rarr; ${escapeHTML(other)}</div>
-            <div class="text-xs text-matrix-dark-green">${c.message_count} msg(s) · thread #${c.id}</div>
+            <div>&rarr; ${escapeHTML(other)} ${badgeHtml}</div>
+            <div class="text-xs text-matrix-dark-green">${c.message_count} msg(s) · thread #${c.id}${sevHtml}</div>
         </a>`);
     });
     detailEl.innerHTML = lines.join('');

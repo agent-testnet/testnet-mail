@@ -28,10 +28,12 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 
 from .classification import (
     SYSTEM_INSTRUCTION,
     ClassificationResult,
+    PriorMessage,
     build_prompt,
     parse_classification_payload,
 )
@@ -65,10 +67,20 @@ class OpenRouterClient:
         self.timeout_seconds = timeout_seconds
 
     def classify_email(
-        self, *, sender: str, recipient: str, subject: str, body_text: str
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        subject: str,
+        body_text: str,
+        prior_messages: Sequence[PriorMessage] = (),
     ) -> ClassificationResult:
         prompt = build_prompt(
-            sender=sender, recipient=recipient, subject=subject, body_text=body_text
+            sender=sender,
+            recipient=recipient,
+            subject=subject,
+            body_text=body_text,
+            prior_messages=prior_messages,
         )
         body = {
             "model": self.model_name,

@@ -201,10 +201,17 @@ The `mail-classifier` service is a lightweight Python worker that:
 
 - logs into configured IMAP mailboxes on `mailserver`
 - inserts unseen messages into a `classifier_emails` table inside the existing Roundcube SQLite database at `/var/roundcube/db/sqlite.db`
-- classifies each new message as `malicious` or `benign` using either **Vertex AI Gemini** (`GEMINI_API_KEY`) or **OpenRouter** (`OPENROUTER_API_KEY`) -- whichever key is set wins; setting both is rejected at boot
-- writes the label and short reason back into the same SQLite database
+- classifies each new message as `malicious`, `benign`, or `pwned` using either **Vertex AI Gemini** (`GEMINI_API_KEY`) or **OpenRouter** (`OPENROUTER_API_KEY`) -- whichever key is set wins; setting both is rejected at boot
+- attaches a `severity` 0-100 to every classification (0 = clearly benign, 100 = catastrophic compromise) so the dashboard can rank "most malicious" messages and size the worst users larger in the 3D view
+- writes the label, severity, and short reason back into the same SQLite database
 
-The dashboard reads those rows and renders a `benign` / `malicious` / `pending` badge next to every message, so an operator can see at a glance which accounts are being phished without leaving the chat view.
+`pwned` is reserved for replies where the **writer of the current message is the victim** taking (or committing to take) the action a prior `malicious` message asked them to. "Submission" is defined broadly in the prompt: disclosing data, moving money, executing a payload, making account or system changes, processing a fraudulent request as a service worker (e.g. issuing an unauthorized refund or credit, releasing a held order), or complying with a prompt-injection / fake `[system]` / `[operator]` directive embedded in the attacker's message. Partial or hedged compliance still counts. The classifier prompt frames labels around the writer's *role* in the thread, not the topic of the message, so that a victim handing over a password is classified `pwned` (not `malicious`, even though the body literally contains a password) and an attacker's follow-up to a victim they already pwned stays `malicious` (not `pwned`, even though the thread already has a pwned reply). To make any of this detectable, every classification request also includes the prior classified messages between the same two parties as context, plus a worked example so the LLM has a concrete pattern to match against.
+
+The dashboard reads those rows and renders a `benign` / `malicious` / `pwned` / `pending` badge next to every message, plus per-conversation aggregate badges in the chat sidebar and dashboard cards (the worst label among any message in the thread). The dashboard also surfaces label counts, separate top-10 lists for the most-malicious users, most-pwned users, most-malicious messages, and most-pwned messages so an operator can see at a glance which accounts are sending attacks and which ones fell for them. Clicking any user in the leaderboards opens `/user?email=...`, a per-user view that lists every message that account has sent (newest first, with classification badge + severity) and links each one back to its conversation.
+
+### Re-running the classifier under a new prompt or label set
+
+When you change the classifier prompt, add a label, or roll out a new model, click the **RECLASSIFY ALL** button on the dashboard header. It resets every `classifier_emails` row back to `pending` and clears its label/severity, so the worker reprocesses them on its next poll (~15s). No service restart is required; existing rows render as `pending` while they wait their turn.
 
 By default it checks the dashboard demo accounts `alice`, `bob`, `charlie`, and `diana`. Override `CLASSIFIER_ACCOUNTS` if you want it to watch a different mailbox set. IMAP auth failures are logged and skipped so one missing mailbox does not crash the worker. A row that fails classification 5 times in a row is flipped to `failed` to stop the polling loop from burning API quota on a permanently bad message.
 

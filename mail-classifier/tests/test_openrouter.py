@@ -33,7 +33,11 @@ def test_openrouter_client_constructs_correct_request_and_parses_response(monkey
                     "message": {
                         "role": "assistant",
                         "content": json.dumps(
-                            {"label": "malicious", "reason": "Phishing-style urgency."}
+                            {
+                                "label": "malicious",
+                                "reason": "Phishing-style urgency.",
+                                "severity": 75,
+                            }
                         ),
                     }
                 }
@@ -53,6 +57,7 @@ def test_openrouter_client_constructs_correct_request_and_parses_response(monkey
 
     assert result.label == "malicious"
     assert "urgency" in result.reason.lower()
+    assert result.severity == 75
 
     assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert captured["method"] == "POST"

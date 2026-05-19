@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .classification import PriorMessage
+
 MAX_CLASSIFICATION_ATTEMPTS = int(os.getenv("CLASSIFIER_MAX_ATTEMPTS", "5"))
+
+# How many prior thread messages to pull as context when classifying a new
+# email. Chosen to give the LLM enough conversation to spot a `pwned` reply
+# without ballooning the prompt size on long threads.
+DEFAULT_PRIOR_THREAD_LIMIT = 10
 
 
 @dataclass(frozen=True)
@@ -25,6 +32,7 @@ class EmailRecord:
 @dataclass(frozen=True)
 class PendingEmail:
     id: int
+    account_email: str
     sender: str
     recipient: str
     subject: str
@@ -69,6 +77,7 @@ class ClassificationRepository:
                     classification_status TEXT NOT NULL DEFAULT 'pending',
                     classification_label TEXT,
                     classification_reason TEXT,
+                    classification_severity INTEGER,
                     classified_at TEXT,
                     classification_model TEXT,
                     classification_attempts INTEGER NOT NULL DEFAULT 0,
@@ -82,6 +91,26 @@ class ClassificationRepository:
                     ON classifier_emails(classification_status, id);
                 """
             )
+            self._migrate_add_column_if_missing(
+                conn, "classifier_emails", "classification_severity", "INTEGER"
+            )
+
+    @staticmethod
+    def _migrate_add_column_if_missing(
+        conn: sqlite3.Connection, table: str, column: str, decl_type: str
+    ) -> None:
+        """Idempotently add a column to an existing table.
+
+        SQLite doesn't support `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`,
+        and live deploys already have a populated `classifier_emails` table
+        from before the new column existed. We probe the schema with
+        PRAGMA table_info and only issue the ALTER when the column is
+        missing, so this is safe to run on every boot."""
+        existing = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl_type}")
 
     def list_known_uids(self, account_email: str, mailbox: str) -> set[str]:
         with self._connect() as conn:
@@ -127,7 +156,7 @@ class ClassificationRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, sender, recipient, subject, body_text
+                SELECT id, account_email, sender, recipient, subject, body_text
                 FROM classifier_emails
                 WHERE classification_status = 'pending'
                   AND classification_attempts < ?
@@ -139,6 +168,7 @@ class ClassificationRepository:
         return [
             PendingEmail(
                 id=row["id"],
+                account_email=row["account_email"],
                 sender=row["sender"],
                 recipient=row["recipient"],
                 subject=row["subject"],
@@ -147,8 +177,56 @@ class ClassificationRepository:
             for row in rows
         ]
 
+    def prior_thread(
+        self,
+        sender: str,
+        recipient: str,
+        exclude_id: int,
+        limit: int = DEFAULT_PRIOR_THREAD_LIMIT,
+    ) -> list[PriorMessage]:
+        """Return previously-classified messages between the same two parties
+        as the email identified by `exclude_id`, oldest-first, so the
+        classifier can spot a `pwned` reply to a prior `malicious` message.
+
+        The (sender, recipient) match is symmetric — we want both directions
+        of the conversation regardless of which side's INBOX a given row
+        landed in. We only return rows that have already been classified so
+        the LLM doesn't see meaningless `pending` placeholders.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT sender, recipient, subject, body_text, classification_label
+                FROM classifier_emails
+                WHERE classification_status = 'classified'
+                  AND id != ?
+                  AND (
+                    (sender = ? AND recipient = ?)
+                    OR (sender = ? AND recipient = ?)
+                  )
+                ORDER BY received_at ASC, id ASC
+                LIMIT ?
+                """,
+                (exclude_id, sender, recipient, recipient, sender, limit),
+            ).fetchall()
+        return [
+            PriorMessage(
+                sender=row["sender"],
+                recipient=row["recipient"],
+                subject=row["subject"],
+                body_text=row["body_text"],
+                label=row["classification_label"] or "",
+            )
+            for row in rows
+        ]
+
     def save_classification(
-        self, email_id: int, label: str, reason: str, model_name: str
+        self,
+        email_id: int,
+        label: str,
+        reason: str,
+        model_name: str,
+        severity: int,
     ) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -157,6 +235,7 @@ class ClassificationRepository:
                 SET classification_status = 'classified',
                     classification_label = ?,
                     classification_reason = ?,
+                    classification_severity = ?,
                     classified_at = ?,
                     classification_model = ?,
                     classification_attempts = classification_attempts + 1,
@@ -164,7 +243,15 @@ class ClassificationRepository:
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (label, reason, utcnow_iso(), model_name, utcnow_iso(), email_id),
+                (
+                    label,
+                    reason,
+                    severity,
+                    utcnow_iso(),
+                    model_name,
+                    utcnow_iso(),
+                    email_id,
+                ),
             )
 
     def record_classification_error(self, email_id: int, error_message: str) -> None:
